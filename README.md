@@ -4,6 +4,16 @@
 
 Pin notes to a classic corkboard on your Windows desktop. The app is small, works offline, and saves your board on your PC without an account. Pop out a sticky note when you want it in view, then tuck the board into the tray.
 
+## Screenshots
+
+![Three sample sticky notes arranged on the corkboard](docs/images/corkboard.jpg)
+
+Corkboard with sample notes (v0.1.1).
+
+![A pink sticky note in its own window](docs/images/pop-out-note.jpg)
+
+A reminder popped out into its own window (v0.1.1).
+
 ## Requirements
 
 - Windows 10 or 11

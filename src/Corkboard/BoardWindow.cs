@@ -13,7 +13,7 @@ internal sealed class BoardWindow : Form
     private readonly Dictionary<Guid, NoteCard> cards = [];
     private readonly Dictionary<Guid, FloatingNote> floating = [];
     private readonly System.Windows.Forms.Timer autosave = new() { Interval = 480 };
-    private readonly NotifyIcon tray;
+    private readonly TrayIcon tray;
     private readonly ContextMenuStrip trayMenu = new();
     private readonly ContextMenuStrip options = new();
     private readonly ToolStripMenuItem startWithWindows = new("Start with Windows");
@@ -90,8 +90,7 @@ internal sealed class BoardWindow : Form
         trayMenu.Items.AddRange([new ToolStripMenuItem("Open Corkboard", null, (_, _) => ShowBoard()),
             new ToolStripMenuItem("New note", null, (_, _) => { ShowBoard(); AddNote(); }),
             new ToolStripSeparator(), new ToolStripMenuItem("Exit Corkboard", null, (_, _) => ExitApp())]);
-        tray = new NotifyIcon { Icon = appIcon, Text = "Corkboard", ContextMenuStrip = trayMenu, Visible = true };
-        tray.MouseClick += (_, e) => { if (e.Button == MouseButtons.Left) ShowBoard(); };
+        tray = new TrayIcon(appIcon, trayMenu, ShowBoard, RestoreIfTrayUnavailable);
         autosave.Tick += (_, _) => SaveNotes();
         RefreshCount();
     }
@@ -101,6 +100,7 @@ internal sealed class BoardWindow : Form
         base.OnShown(e);
         if (initialized) return;
         initialized = true;
+        tray.EnsureRegistered();
         canvas.SuspendLayout();
         foreach (StickyNote note in data.Notes) AddCard(note);
         canvas.ResumeLayout();
@@ -125,7 +125,7 @@ internal sealed class BoardWindow : Form
         {
             exiting = true;
             SaveNotes();
-            tray.Visible = false;
+            tray.Dispose();
         }
         base.OnFormClosing(e);
     }
@@ -341,11 +341,35 @@ internal sealed class BoardWindow : Form
     {
         if (!Visible || hidingToTray) return;
         hidingToTray = true;
-        Hide();
-        ShowInTaskbar = false;
-        if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
-        hidingToTray = false;
-        SaveNotes();
+        try
+        {
+            SaveNotes();
+            if (!tray.EnsureRegistered())
+            {
+                ShowInTaskbar = true;
+                WindowState = FormWindowState.Minimized;
+                ShowTrayUnavailable();
+                return;
+            }
+
+            Hide();
+            ShowInTaskbar = false;
+            if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
+        }
+        finally { hidingToTray = false; }
+    }
+
+    private void RestoreIfTrayUnavailable()
+    {
+        if (exiting || Visible) return;
+        ShowBoard();
+        ShowTrayUnavailable();
+    }
+
+    private void ShowTrayUnavailable()
+    {
+        saveStatus.ForeColor = BoardStyle.Brick;
+        saveStatus.Text = "Tray icon unavailable. Corkboard is on the taskbar.";
     }
 
     private void MarkDirty()
