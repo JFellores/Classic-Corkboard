@@ -5,19 +5,49 @@ namespace Corkboard;
 
 internal sealed class BoardData
 {
+    [System.Text.Json.Serialization.JsonPropertyName("Notes")]
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public List<StickyNote>? LegacyNotes { get; set; }
+    public List<CorkBoard> Boards { get; init; } = [];
+    public Guid? LastBoard { get; set; }
+
+    public void Upgrade()
+    {
+        if (Boards.Count == 0) Boards.Add(new CorkBoard { Name = "My corkboard", Notes = LegacyNotes ?? [] });
+        LegacyNotes = null;
+    }
+}
+
+internal sealed class CorkBoard
+{
+    public Guid Id { get; init; } = Guid.NewGuid();
+    public string Name { get; set; } = "Corkboard";
     public List<StickyNote> Notes { get; init; } = [];
+    public List<NoteThread> Threads { get; init; } = [];
+    public Rectangle? Bounds { get; set; }
+    public bool WasOpen { get; set; }
 }
 
 internal sealed class StickyNote
 {
     public Guid Id { get; init; } = Guid.NewGuid();
     public string Text { get; set; } = "";
+    public string? FormattedText { get; set; }
+    public string Label { get; set; } = "";
+    public bool Pinned { get; set; }
     public int Color { get; set; }
     public int X { get; set; }
     public int Y { get; set; }
     public bool PoppedOut { get; set; }
     public bool AlwaysOnTop { get; set; }
     public Rectangle? PopupBounds { get; set; }
+}
+
+internal sealed class NoteThread
+{
+    public Guid From { get; init; }
+    public Guid To { get; init; }
+    public int Color { get; set; }
 }
 
 internal sealed class NoteStore(string folder)
@@ -45,7 +75,12 @@ internal sealed class NoteStore(string folder)
             }
             catch (Exception fallback) when (IsStorageError(fallback))
             {
-                if (IsMissing(original) && IsMissing(fallback)) return (new BoardData(), null);
+                if (IsMissing(original) && IsMissing(fallback))
+                {
+                    var empty = new BoardData();
+                    empty.Upgrade();
+                    return (empty, null);
+                }
                 throw new IOException("Neither the current note file nor its backup could be loaded.", original);
             }
         }
@@ -70,9 +105,13 @@ internal sealed class NoteStore(string folder)
     {
         using var stream = File.OpenRead(path);
         BoardData? data = JsonSerializer.Deserialize<BoardData>(stream, JsonOptions);
-        if (data?.Notes is null || data.Notes.Any(note => note is null || note.Text is null)
-            || data.Notes.Select(note => note.Id).Distinct().Count() != data.Notes.Count)
-            throw new JsonException("The note file is invalid.");
+        if (data is null || data.Boards is null || data.Boards.Any(board => board is null)) throw new JsonException("The board file is invalid.");
+        data.Upgrade();
+        if (data.Boards.Select(board => board.Id).Distinct().Count() != data.Boards.Count || data.Boards.Any(board =>
+            board.Name is null || board.Notes is null || board.Threads is null || board.Threads.Any(thread => thread is null)
+            || board.Notes.Any(note => note is null || note.Text is null || note.Label is null)
+            || board.Notes.Select(note => note.Id).Distinct().Count() != board.Notes.Count))
+            throw new JsonException("The board file is invalid.");
         return data;
     }
 

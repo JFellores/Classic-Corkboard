@@ -4,7 +4,15 @@
 
 Pin notes to a classic corkboard on your Windows desktop. The app is small, works offline, and saves your board on your PC without an account. Pop out a sticky note when you want it in view, then tuck the board into the tray.
 
+## In v0.2.0
+
+**Wooden frames and separate boards.** Added resizable wooden frames, independent corkboards, a saved-notes drawer, lockable pins, colored threads, labels, and rich text.
+
 ## Screenshots
+
+![The corkboard drawer listing two boards and their saved notes](docs/images/release-0.2.0.jpg)
+
+The wooden board and Corkboards drawer. (v0.2.0)
 
 ![Three sample sticky notes arranged on the corkboard](docs/images/corkboard.jpg)
 
@@ -38,9 +46,10 @@ Open `artifacts\win-x64\Corkboard.exe` on an x64 Windows PC with the .NET 8 Desk
 
 ## Use the board
 
-1. Create a note from the board and drag it into place.
+1. Double-click the cork or use the floating board menu to create a note. Use the Corkboards drawer to switch between boards.
 2. Pop out a reminder to keep it visible while using other apps.
 3. Minimize the board to the Windows notification area. Click the tray icon to bring it back.
+4. Click a note’s pin to lock it in place. Open the pin menu again to connect it to another note with a thread.
 
 The default data folder is `%LOCALAPPDATA%\Corkboard`. See [.env.example](.env.example) for the optional development override.
 

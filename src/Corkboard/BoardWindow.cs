@@ -1,183 +1,260 @@
+using System.Drawing.Drawing2D;
+
 namespace Corkboard;
 
-internal sealed class BoardWindow : Form
+internal sealed class BoardWindow : ResizableWindow
 {
-    private readonly NoteStore store;
-    private readonly BoardData data;
-    private readonly Panel canvas;
-    private readonly Panel emptyState;
-    private readonly Label count;
-    private readonly Label saveStatus;
-    private readonly Bitmap cork = BoardStyle.CreateCorkTile();
-    private readonly Icon appIcon = Icon.ExtractAssociatedIcon(Environment.ProcessPath!) ?? (Icon)SystemIcons.Application.Clone();
+    private readonly CorkboardApp app;
+    private readonly CorkBoard board;
+    private readonly BoardSurface canvas;
     private readonly Dictionary<Guid, NoteCard> cards = [];
     private readonly Dictionary<Guid, FloatingNote> floating = [];
-    private readonly System.Windows.Forms.Timer autosave = new() { Interval = 480 };
-    private readonly TrayIcon tray;
-    private readonly ContextMenuStrip trayMenu = new();
-    private readonly ContextMenuStrip options = new();
-    private readonly ToolStripMenuItem startWithWindows = new("Start with Windows");
-    private bool dirty;
-    private bool exiting;
+    private readonly Button fab;
+    private readonly Panel actions;
+    private readonly Panel drawerClip = new() { Visible = false };
+    private readonly Panel drawer = new() { BackColor = BoardStyle.Paper };
+    private readonly ListBox boardList = new() { IntegralHeight = false, AccessibleName = "Corkboards" };
+    private readonly ListBox savedNotes = new() { IntegralHeight = false, AccessibleName = "Saved notes" };
+    private readonly Label notice;
+    private readonly Panel emptyState;
+    private readonly ContextMenuStrip threadMenu = new();
+    private readonly ToolTip tips = new();
+    private readonly System.Windows.Forms.Timer drawerMotion = new() { Interval = 16 };
+    private readonly System.Windows.Forms.Timer noticeTimer = new() { Interval = 5000 };
+    private Guid? connectFrom;
+    private bool selectPin;
     private bool initialized;
-    private bool hidingToTray;
+    private bool hiding;
+    private bool drawerOpening;
+    private bool closing;
+    private Rectangle? lastNormalBounds;
+    private Rectangle? hiddenBounds;
+    private bool hiddenMaximized;
 
-    public BoardWindow(NoteStore store, BoardData data, string? warning)
+    protected override int FrameDragWidth => 24;
+    private int Frame => Pixels(FrameDragWidth);
+    private int DrawerWidth => Pixels(280);
+
+    public BoardWindow(CorkboardApp app, CorkBoard board)
     {
-        this.store = store;
-        this.data = data;
-        Text = "Corkboard";
-        Icon = appIcon;
+        this.app = app;
+        this.board = board;
+        Text = board.Name;
+        Icon = app.Icon;
         Font = new Font("Segoe UI", 10F);
         ForeColor = BoardStyle.Ink;
-        BackColor = BoardStyle.Paper;
-        ClientSize = new Size(1000, 640);
-        MinimumSize = new Size(450, 340);
+        BackColor = BoardStyle.Cork;
+        DoubleBuffered = true;
+        SetStyle(ControlStyles.ResizeRedraw, true);
+        MinimumSize = new Size(375, 380);
+        ClientSize = new Size(980, 620);
         StartPosition = FormStartPosition.CenterScreen;
-        AutoScaleMode = AutoScaleMode.Dpi;
+        if (board.Bounds is Rectangle previous)
+        {
+            StartPosition = FormStartPosition.Manual;
+            Bounds = FitOnScreen(previous, MinimumSize, Screen.FromPoint(Cursor.Position));
+        }
+        ResizeEnd += (_, _) => RememberBounds();
 
-        var toolbar = new Panel { Dock = DockStyle.Top, Height = 66, Padding = new Padding(20, 13, 18, 13) };
-        var title = new Label
+        canvas = new BoardSurface(DrawThreads);
+        canvas.MouseClick += CanvasClick;
+        canvas.MouseDoubleClick += (_, e) =>
         {
-            Text = "Corkboard", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft,
-            Font = new Font("Georgia", 22F, FontStyle.Bold), AutoEllipsis = true
+            if (e.Button == MouseButtons.Left && HitThread(e.Location) is null && !selectPin && connectFrom is null) AddNote(e.Location);
         };
-        var actions = new FlowLayoutPanel
-        {
-            Dock = DockStyle.Right, Width = 212, FlowDirection = FlowDirection.RightToLeft,
-            WrapContents = false, Padding = new Padding(0, 3, 0, 0)
-        };
-        Button more = BoardStyle.Button("Options ▾", Color.FromArgb(237, 227, 210), BoardStyle.Ink);
-        more.Size = new Size(86, 34);
-        more.Click += (_, _) => options.Show(more, new Point(more.Width, more.Height), ToolStripDropDownDirection.BelowLeft);
-        Button add = BoardStyle.Button("+  New note", BoardStyle.Brick, Color.White);
-        add.Size = new Size(108, 34);
-        add.Margin = new Padding(0, 0, 8, 0);
-        add.Click += (_, _) => AddNote();
-        actions.Controls.AddRange([more, add]);
-        toolbar.Controls.Add(title);
-        toolbar.Controls.Add(actions);
-
-        var footer = new Panel { Dock = DockStyle.Bottom, Height = 31, Padding = new Padding(16, 0, 16, 0) };
-        count = new Label { Dock = DockStyle.Left, Width = 120, TextAlign = ContentAlignment.MiddleLeft, ForeColor = BoardStyle.Muted };
-        saveStatus = new Label
-        {
-            Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleRight, ForeColor = BoardStyle.Muted,
-            AutoEllipsis = true, Text = warning ?? "Stored on this PC"
-        };
-        footer.Controls.Add(saveStatus);
-        footer.Controls.Add(count);
-
-        canvas = new Panel
-        {
-            Name = "Board", AccessibleName = "Corkboard surface", Dock = DockStyle.Fill,
-            AutoScroll = true, BackColor = Color.FromArgb(174, 125, 86),
-            BackgroundImage = cork, BackgroundImageLayout = ImageLayout.Tile
-        };
-        canvas.MouseDoubleClick += (_, e) => { if (e.Button == MouseButtons.Left) AddNote(e.Location); };
-        emptyState = CreateEmptyState();
+        emptyState = BuildEmptyState();
         canvas.Controls.Add(emptyState);
-        canvas.Resize += (_, _) => CenterEmptyState();
-        Controls.Add(canvas);
-        Controls.Add(footer);
-        Controls.Add(toolbar);
 
-        startWithWindows.Click += (_, _) => ChangeStartup();
-        options.Items.AddRange([startWithWindows, new ToolStripMenuItem("Minimize to tray", null, (_, _) => HideBoard()),
-            new ToolStripSeparator(), new ToolStripMenuItem("Exit Corkboard", null, (_, _) => ExitApp())]);
-        options.Opening += (_, _) => RefreshStartup();
+        notice = new Label { Visible = false, TextAlign = ContentAlignment.MiddleCenter, BackColor = BoardStyle.Paper, AutoEllipsis = true };
+        noticeTimer.Tick += (_, _) => { noticeTimer.Stop(); notice.Visible = false; };
 
-        trayMenu.Items.AddRange([new ToolStripMenuItem("Open Corkboard", null, (_, _) => ShowBoard()),
-            new ToolStripMenuItem("New note", null, (_, _) => { ShowBoard(); AddNote(); }),
-            new ToolStripSeparator(), new ToolStripMenuItem("Exit Corkboard", null, (_, _) => ExitApp())]);
-        tray = new TrayIcon(appIcon, trayMenu, ShowBoard, RestoreIfTrayUnavailable);
-        autosave.Tick += (_, _) => SaveNotes();
-        RefreshCount();
+        fab = BoardStyle.Button("≡", BoardStyle.Brick, Color.White);
+        fab.Font = new Font("Segoe UI", 19F);
+        fab.AccessibleName = "Board actions";
+        tips.SetToolTip(fab, "Board actions");
+        actions = BuildActions();
+        fab.Click += (_, _) =>
+        {
+            if (drawerClip.Visible) { AnimateDrawer(false); return; }
+            actions.Visible = !actions.Visible;
+        };
+        BuildDrawer();
+        drawerMotion.Tick += (_, _) => SlideDrawer();
+
+        Controls.AddRange([canvas, drawerClip, actions, fab, notice]);
+        notice.BringToFront();
+        fab.BringToFront();
+        actions.BringToFront();
+        drawerClip.BringToFront();
+        LayoutBoard();
+    }
+
+    protected override void OnLoad(EventArgs e)
+    {
+        base.OnLoad(e);
+        if (initialized) return;
+        initialized = true;
+        canvas.SuspendLayout();
+        foreach (StickyNote note in board.Notes) AddCard(note);
+        canvas.ResumeLayout();
+        UpdateEmptyState();
     }
 
     protected override void OnShown(EventArgs e)
     {
         base.OnShown(e);
-        if (initialized) return;
-        initialized = true;
-        tray.EnsureRegistered();
-        canvas.SuspendLayout();
-        foreach (StickyNote note in data.Notes) AddCard(note);
-        canvas.ResumeLayout();
-        foreach (StickyNote note in data.Notes.Where(note => note.PoppedOut)) OpenFloatingNote(note, activate: false);
+        if (closing) return;
+        foreach (StickyNote note in board.Notes.Where(note => note.PoppedOut)) OpenFloating(note, false);
+        RememberBounds();
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        base.OnPaint(e);
+        BoardStyle.DrawFrame(e.Graphics, ClientSize.Width, ClientSize.Height, Frame);
     }
 
     protected override void OnResize(EventArgs e)
     {
         base.OnResize(e);
-        if (WindowState == FormWindowState.Minimized && IsHandleCreated && !hidingToTray)
-            BeginInvoke(() => { if (WindowState == FormWindowState.Minimized) HideBoard(); });
+        TrackNormalBounds();
+        if (canvas is not null) LayoutBoard();
+        if (WindowState == FormWindowState.Minimized && IsHandleCreated && !hiding)
+            BeginInvoke(() => { if (!closing && WindowState == FormWindowState.Minimized) MinimizeBoard(); });
+    }
+
+    protected override void OnMove(EventArgs e)
+    {
+        base.OnMove(e);
+        TrackNormalBounds();
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
-        if (!exiting && e.CloseReason == CloseReason.UserClosing)
-        {
-            e.Cancel = true;
-            HideBoard();
-        }
-        else
-        {
-            exiting = true;
-            SaveNotes();
-            tray.Dispose();
-        }
         base.OnFormClosing(e);
+        if (e.Cancel) return;
+        RememberBounds();
+        app.Save();
+        closing = true;
+        foreach (FloatingNote popup in floating.Values.ToArray()) popup.Close();
     }
 
-    protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+    protected override bool ProcessCmdKey(ref Message msg, Keys keys)
     {
-        if (keyData != (Keys.Control | Keys.N)) return base.ProcessCmdKey(ref msg, keyData);
-        AddNote();
-        return true;
+        if (keys == (Keys.Control | Keys.N)) { AddNote(); return true; }
+        if (keys == (Keys.Control | Keys.B) && !canvas.ContainsFocus) { AnimateDrawer(!drawerClip.Visible); return true; }
+        if (keys == Keys.Escape && (selectPin || connectFrom.HasValue || actions.Visible || drawerClip.Visible))
+        {
+            ClearSelectionMode();
+            actions.Visible = false;
+            AnimateDrawer(false);
+            return true;
+        }
+        return base.ProcessCmdKey(ref msg, keys);
     }
 
     protected override void Dispose(bool disposing)
     {
         if (disposing)
         {
-            foreach (FloatingNote window in floating.Values.ToArray()) window.Dispose();
-            tray.Dispose();
-            trayMenu.Dispose();
-            options.Dispose();
-            autosave.Dispose();
-            cork.Dispose();
-            appIcon.Dispose();
+            closing = true;
+            foreach (FloatingNote popup in floating.Values.ToArray()) popup.Dispose();
+            noticeTimer.Dispose();
+            drawerMotion.Dispose();
+            tips.Dispose();
+            threadMenu.Dispose();
         }
         base.Dispose(disposing);
     }
 
     public void ShowBoard()
     {
-        if (exiting) return;
         ShowInTaskbar = true;
         Show();
         if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
+        if (hiddenBounds is Rectangle previous)
+        {
+            hiddenBounds = null;
+            Bounds = FitOnScreen(previous, MinimumSize, Screen.FromControl(this));
+            if (hiddenMaximized)
+            {
+                MaximizedBounds = Screen.FromControl(this).WorkingArea;
+                WindowState = FormWindowState.Maximized;
+            }
+        }
         Activate();
+    }
+
+    public void ShowNotice(string message, bool stay = false)
+    {
+        notice.Text = message;
+        notice.Visible = true;
+        noticeTimer.Stop();
+        if (!stay) noticeTimer.Start();
+    }
+
+    public void FocusNote(StickyNote note)
+    {
+        if (!cards.TryGetValue(note.Id, out NoteCard? card)) return;
+        AnimateDrawer(false);
+        canvas.ScrollControlIntoView(card);
+        card.BringToFront();
+        card.FocusEditor();
+    }
+
+    public void AddNote(Point? click = null)
+    {
+        actions.Visible = false;
+        ClearSelectionMode();
+        Point scroll = canvas.AutoScrollPosition;
+        Point position = click is Point point
+            ? new Point(Math.Max(8, point.X - scroll.X - 14), Math.Max(8, point.Y - scroll.Y - 15))
+            : NextOpenPosition();
+        var note = new StickyNote { Color = board.Notes.Count % BoardStyle.Colors.Length };
+        board.Notes.Add(note);
+        MoveNote(note, position.X, position.Y);
+        AddCard(note);
+        UpdateEmptyState();
+        FocusNote(note);
+        RefreshSavedNotes();
+        app.MarkDirty();
     }
 
     public void MoveNote(StickyNote note, int x, int y)
     {
+        if (note.Pinned) return;
         int logicalX = (int)Math.Round(x * 96.0 / DeviceDpi);
         int logicalY = (int)Math.Round(y * 96.0 / DeviceDpi);
         if (note.X == logicalX && note.Y == logicalY) return;
         note.X = logicalX;
         note.Y = logicalY;
-        MarkDirty();
+        app.MarkDirty();
     }
 
-    public void ChangeText(StickyNote note, string text, NoteCard sender)
+    public void ChangeText(StickyNote note, string text, string rtf, NoteCard sender)
     {
-        if (note.Text == text) return;
+        if (note.Text == text && note.FormattedText == rtf) return;
         note.Text = text;
-        if (cards.TryGetValue(note.Id, out NoteCard? card) && card != sender) card.SetText(text);
-        if (floating.TryGetValue(note.Id, out FloatingNote? popup) && popup.Card != sender) popup.Card.SetText(text);
-        MarkDirty();
+        note.FormattedText = rtf;
+        if (cards.TryGetValue(note.Id, out NoteCard? card) && card != sender) card.ReadText();
+        if (floating.TryGetValue(note.Id, out FloatingNote? popup) && popup.Card != sender) popup.Card.ReadText();
+        if (drawerClip.Visible) RefreshSavedNotes();
+        app.MarkDirty();
+    }
+
+    public void EditLabel(StickyNote note, Form owner)
+    {
+        string? label = NamePrompt.Show(owner, "Label note", "Category or label", note.Label, 45);
+        if (label is null || label == note.Label) return;
+        note.Label = label;
+        cards[note.Id].RefreshLabel();
+        if (floating.TryGetValue(note.Id, out FloatingNote? popup))
+        {
+            popup.Card.RefreshLabel();
+            popup.Text = string.IsNullOrWhiteSpace(label) ? "Sticky note" : label;
+        }
+        RefreshSavedNotes();
+        app.MarkDirty();
     }
 
     public void ChangeColor(StickyNote note, int color)
@@ -186,90 +263,296 @@ internal sealed class BoardWindow : Form
         note.Color = color;
         cards[note.Id].ApplyColor();
         if (floating.TryGetValue(note.Id, out FloatingNote? popup)) popup.Card.ApplyColor();
-        MarkDirty();
+        app.MarkDirty();
+    }
+
+    public void SetPinned(StickyNote note, bool pinned)
+    {
+        if (note.Pinned == pinned) return;
+        note.Pinned = pinned;
+        cards[note.Id].RefreshPin();
+        if (!pinned)
+        {
+            board.Threads.RemoveAll(thread => thread.From == note.Id || thread.To == note.Id);
+            canvas.Invalidate();
+            if (connectFrom == note.Id) ClearSelectionMode();
+        }
+        app.MarkDirty();
+    }
+
+    public bool HandlePinSelection(StickyNote note)
+    {
+        if (connectFrom is Guid source)
+        {
+            if (source == note.Id) return true;
+            if (!board.Threads.Any(thread => thread.From == source && thread.To == note.Id || thread.From == note.Id && thread.To == source))
+            {
+                SetPinned(note, true);
+                board.Threads.Add(new NoteThread { From = source, To = note.Id });
+                canvas.Invalidate();
+                app.MarkDirty();
+            }
+            ClearSelectionMode();
+            return true;
+        }
+        if (!selectPin) return false;
+        SetPinned(note, true);
+        ClearSelectionMode();
+        return true;
+    }
+
+    public void StartThread(StickyNote note)
+    {
+        selectPin = false;
+        connectFrom = note.Id;
+        ShowNotice("Click another note’s pin to connect it. Esc cancels.", true);
     }
 
     public void PopOut(StickyNote note)
     {
-        if (!note.PoppedOut)
-        {
-            note.PoppedOut = true;
-            MarkDirty();
-        }
-        OpenFloatingNote(note, activate: true);
+        if (!note.PoppedOut) { note.PoppedOut = true; app.MarkDirty(); }
+        OpenFloating(note, true);
     }
 
-    public void TogglePin(StickyNote note)
+    public void ToggleAlwaysOnTop(StickyNote note)
     {
         note.AlwaysOnTop = !note.PoppedOut || !note.AlwaysOnTop;
         PopOut(note);
         floating[note.Id].TopMost = note.AlwaysOnTop;
-        MarkDirty();
-    }
-
-    public void ReturnToBoard(StickyNote note)
-    {
-        if (floating.TryGetValue(note.Id, out FloatingNote? popup)) popup.Close();
-        ShowBoard();
-        canvas.ScrollControlIntoView(cards[note.Id]);
-        cards[note.Id].BringToFront();
-        cards[note.Id].FocusEditor();
-    }
-
-    public void DeleteNote(StickyNote note, Form parent)
-    {
-        if (MessageBox.Show(parent, "Delete this note?", "Corkboard", MessageBoxButtons.YesNo,
-            MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
-        if (floating.TryGetValue(note.Id, out FloatingNote? popup)) popup.Close();
-        cards.Remove(note.Id, out NoteCard? card);
-        card?.Dispose();
-        data.Notes.Remove(note);
-        RefreshCount();
-        MarkDirty();
+        app.MarkDirty();
     }
 
     public void SavePopupBounds(StickyNote note, Rectangle bounds)
     {
-        if (exiting || bounds == note.PopupBounds) return;
+        if (closing || bounds == note.PopupBounds) return;
         note.PopupBounds = bounds;
-        MarkDirty();
+        app.MarkDirty();
     }
 
-    private void OpenFloatingNote(StickyNote note, bool activate)
+    public void DeleteNote(StickyNote note, Form owner)
     {
-        if (!floating.TryGetValue(note.Id, out FloatingNote? window))
+        if (MessageBox.Show(owner, "Delete this note?", "Corkboard", MessageBoxButtons.YesNo, MessageBoxIcon.Question,
+            MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
+        SetPinned(note, false);
+        if (floating.TryGetValue(note.Id, out FloatingNote? popup)) popup.Close();
+        if (cards.Remove(note.Id, out NoteCard? card)) card.Dispose();
+        board.Notes.Remove(note);
+        UpdateEmptyState();
+        RefreshSavedNotes();
+        app.MarkDirty();
+    }
+
+    public void RefreshBoardList()
+    {
+        CorkBoard selected = boardList.SelectedItem as CorkBoard ?? board;
+        boardList.BeginUpdate();
+        boardList.Items.Clear();
+        boardList.Items.AddRange(app.Boards.Cast<object>().ToArray());
+        boardList.SelectedItem = selected;
+        boardList.EndUpdate();
+        RefreshSavedNotes();
+    }
+
+    private void MinimizeBoard()
+    {
+        if (!Visible || hiding) return;
+        hiding = true;
+        try
         {
-            window = new FloatingNote(this, note, appIcon, activate);
-            floating.Add(note.Id, window);
-            window.FormClosed += (_, _) =>
+            actions.Visible = false;
+            RememberBounds();
+            if (!app.CanHideInTray(board))
             {
-                floating.Remove(note.Id);
-                if (exiting) return;
-                note.PoppedOut = false;
-                MarkDirty();
-            };
-            window.Show();
+                ShowInTaskbar = true;
+                WindowState = FormWindowState.Minimized;
+                ShowNotice("Tray unavailable. Corkboard is on the taskbar.");
+                return;
+            }
+            hiddenBounds = lastNormalBounds ?? board.Bounds;
+            hiddenMaximized = WindowState == FormWindowState.Maximized;
+            Hide();
+            ShowInTaskbar = false;
+            if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
         }
-        if (!activate) return;
-        if (window.WindowState == FormWindowState.Minimized) window.WindowState = FormWindowState.Normal;
-        window.Activate();
-        window.Card.FocusEditor();
+        finally { hiding = false; }
     }
 
-    private void AddNote(Point? click = null)
+    private Panel BuildActions()
     {
-        Point scroll = canvas.AutoScrollPosition;
-        Point position = click is Point point
-            ? new Point(Math.Max(8, point.X - scroll.X - 16), Math.Max(8, point.Y - scroll.Y - 15))
-            : NextOpenPosition();
-        var note = new StickyNote { Color = data.Notes.Count % BoardStyle.Colors.Length };
-        data.Notes.Add(note);
-        MoveNote(note, position.X, position.Y);
-        NoteCard card = AddCard(note);
-        RefreshCount();
-        canvas.ScrollControlIntoView(card);
-        card.FocusEditor();
-        MarkDirty();
+        var panel = new Panel { BackColor = BoardStyle.Paper, Visible = false, BorderStyle = BorderStyle.FixedSingle };
+        var stack = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false, Padding = new Padding(5) };
+        Add("＋  Add note", () => AddNote());
+        Add("●  Add pin", () => { actions.Visible = false; selectPin = true; connectFrom = null; ShowNotice("Click a note’s pin to lock it. Esc cancels.", true); });
+        Add("≡  Corkboards", () => { actions.Visible = false; AnimateDrawer(true); });
+        Add("−  Minimize to tray", MinimizeBoard);
+        Add("□  Maximize / restore", () =>
+        {
+            actions.Visible = false;
+            MaximizedBounds = Screen.FromControl(this).WorkingArea;
+            WindowState = WindowState == FormWindowState.Maximized ? FormWindowState.Normal : FormWindowState.Maximized;
+        });
+        Button startup = Add("Start with Windows", () =>
+        {
+            try { Startup.SetEnabled(!Startup.IsEnabled()); }
+            catch (Exception error) when (error is UnauthorizedAccessException or System.Security.SecurityException or IOException)
+            { ShowNotice("Windows couldn’t change the startup setting."); }
+        });
+        startup.Click += (_, _) => UpdateStartupLabel();
+        Add("×  Close board", Close);
+        Add("Exit Corkboard", app.Exit);
+        panel.VisibleChanged += (_, _) => { if (panel.Visible) UpdateStartupLabel(); };
+        panel.Controls.Add(stack);
+        return panel;
+
+        Button Add(string text, Action action)
+        {
+            Button button = BoardStyle.Button(text, BoardStyle.Paper, BoardStyle.Ink);
+            button.Size = new Size(163, 30);
+            button.TextAlign = ContentAlignment.MiddleLeft;
+            button.Padding = new Padding(5, 0, 1, 0);
+            button.Click += (_, _) => action();
+            stack.Controls.Add(button);
+            return button;
+        }
+        void UpdateStartupLabel()
+        {
+            try { startup.Text = Startup.IsEnabled() ? "✓  Start with Windows" : "○  Start with Windows"; }
+            catch (Exception error) when (error is UnauthorizedAccessException or System.Security.SecurityException or IOException)
+            { startup.Enabled = false; }
+        }
+    }
+
+    private void BuildDrawer()
+    {
+        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 6, Padding = new Padding(12) };
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 31));
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 35));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 33));
+        var heading = new Label { Text = "Corkboards", Dock = DockStyle.Fill, Font = new Font("Georgia", 14, FontStyle.Bold) };
+        var header = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty };
+        Button dismiss = BoardStyle.Button("×", BoardStyle.Paper, BoardStyle.Ink);
+        dismiss.Dock = DockStyle.Right;
+        dismiss.Width = 32;
+        dismiss.AccessibleName = "Close board list";
+        dismiss.Click += (_, _) => AnimateDrawer(false);
+        header.Controls.Add(heading);
+        header.Controls.Add(dismiss);
+        boardList.DisplayMember = nameof(CorkBoard.Name);
+        boardList.SelectedIndexChanged += (_, _) => RefreshSavedNotes();
+        boardList.DoubleClick += (_, _) => OpenSelected();
+        boardList.Dock = DockStyle.Fill;
+        boardList.BackColor = Color.White;
+        savedNotes.DisplayMember = nameof(NoteListItem.Caption);
+        savedNotes.Dock = DockStyle.Fill;
+        savedNotes.DoubleClick += (_, _) => OpenSavedNote();
+        var notesLabel = new Label { Text = "Saved notes", Dock = DockStyle.Fill, TextAlign = ContentAlignment.BottomLeft };
+
+        var commands = new FlowLayoutPanel { Dock = DockStyle.Fill, Margin = Padding.Empty, WrapContents = false };
+        AddCommand(commands, "New board", () => app.CreateBoard(this), 86);
+        AddCommand(commands, "Open", OpenSelected, 56);
+        AddCommand(commands, "Rename", () => { if (boardList.SelectedItem is CorkBoard selected) app.RenameBoard(this, selected); }, 76);
+        var noteCommands = new FlowLayoutPanel { Dock = DockStyle.Fill, Margin = Padding.Empty };
+        AddCommand(noteCommands, "Open note", OpenSavedNote, 92);
+        layout.Controls.Add(header, 0, 0);
+        layout.Controls.Add(boardList, 0, 1);
+        layout.Controls.Add(commands, 0, 2);
+        layout.Controls.Add(notesLabel, 0, 3);
+        layout.Controls.Add(savedNotes, 0, 4);
+        layout.Controls.Add(noteCommands, 0, 5);
+        drawer.Controls.Add(layout);
+        drawerClip.Controls.Add(drawer);
+
+        void AddCommand(Control group, string text, Action click, int width)
+        {
+            Button button = BoardStyle.Button(text, BoardStyle.PanelTint, BoardStyle.Ink);
+            button.Size = new Size(width, 28);
+            button.Margin = new Padding(0, 3, 4, 0);
+            button.Click += (_, _) => click();
+            group.Controls.Add(button);
+        }
+        void OpenSelected() { if (boardList.SelectedItem is CorkBoard selected) app.Open(selected); }
+        void OpenSavedNote()
+        {
+            if (boardList.SelectedItem is CorkBoard selected && savedNotes.SelectedItem is NoteListItem item)
+                app.Open(selected).FocusNote(item.Note);
+        }
+    }
+
+    private void RefreshSavedNotes()
+    {
+        Guid? selected = (savedNotes.SelectedItem as NoteListItem)?.Note.Id;
+        savedNotes.BeginUpdate();
+        savedNotes.Items.Clear();
+        if (boardList.SelectedItem is CorkBoard source)
+            foreach (StickyNote note in source.Notes)
+            {
+                var item = new NoteListItem(note);
+                savedNotes.Items.Add(item);
+                if (note.Id == selected) savedNotes.SelectedItem = item;
+            }
+        savedNotes.EndUpdate();
+    }
+
+    private void AnimateDrawer(bool open)
+    {
+        if (!open && !drawerClip.Visible) return;
+        drawerOpening = open;
+        if (open)
+        {
+            RefreshBoardList();
+            drawerClip.Visible = true;
+        }
+        LayoutBoard();
+        drawerMotion.Start();
+    }
+
+    private void SlideDrawer()
+    {
+        int next = Math.Clamp(drawerClip.Width + (drawerOpening ? Pixels(40) : -Pixels(40)), 0, DrawerWidth);
+        drawerClip.Width = next;
+        drawer.Left = next - DrawerWidth;
+        if (next != (drawerOpening ? DrawerWidth : 0)) return;
+        drawerMotion.Stop();
+        if (!drawerOpening) drawerClip.Visible = false;
+    }
+
+    private void LayoutBoard()
+    {
+        int inset = Frame;
+        canvas.Bounds = new Rectangle(inset, inset, Math.Max(0, ClientSize.Width - inset * 2), Math.Max(0, ClientSize.Height - inset * 2));
+        emptyState.Location = new Point(Math.Max(8, (canvas.ClientSize.Width - emptyState.Width) / 2), Math.Max(8, (canvas.ClientSize.Height - emptyState.Height) / 2));
+        fab.Bounds = new Rectangle(inset + Pixels(11), Math.Max(inset, ClientSize.Height - inset - Pixels(54)), Pixels(44), Pixels(44));
+        using var shape = new GraphicsPath();
+        shape.AddEllipse(0, 0, fab.Width, fab.Height);
+        Region? previous = fab.Region;
+        fab.Region = new Region(shape);
+        previous?.Dispose();
+        actions.Bounds = new Rectangle(fab.Left, Math.Max(inset + Pixels(4), fab.Top - Pixels(257)), Pixels(175), Pixels(252));
+        drawerClip.Location = new Point(fab.Left, inset + Pixels(9));
+        drawerClip.Height = Math.Max(0, fab.Top - drawerClip.Top - Pixels(7));
+        drawer.Size = new Size(DrawerWidth, drawerClip.Height);
+        notice.Bounds = new Rectangle(inset + Pixels(9), inset + Pixels(8), Math.Max(0, canvas.Width - Pixels(18)), Pixels(27));
+    }
+
+    private Panel BuildEmptyState()
+    {
+        var panel = new Panel { Size = new Size(245, 112), BackColor = BoardStyle.Paper };
+        var label = new Label { Text = "Double-click to add a note", Bounds = new Rectangle(0, 29, 245, 27), TextAlign = ContentAlignment.MiddleCenter };
+        Button button = BoardStyle.Button("Add note", BoardStyle.Brick, Color.White);
+        button.Bounds = new Rectangle(75, 63, 95, 29);
+        button.Click += (_, _) => AddNote();
+        panel.Controls.AddRange([label, button]);
+        panel.Paint += (_, e) => BoardStyle.DrawPin(e.Graphics, new Point(panel.Width / 2, 16));
+        return panel;
+    }
+
+    private void UpdateEmptyState()
+    {
+        emptyState.Visible = board.Notes.Count == 0;
+        if (emptyState.Visible) LayoutBoard();
     }
 
     private NoteCard AddCard(StickyNote note)
@@ -277,8 +560,8 @@ internal sealed class BoardWindow : Form
         Point scroll = canvas.AutoScrollPosition;
         var card = new NoteCard(this, note, floating: false)
         {
-            Size = new Size(Pixels(231), Pixels(172)),
-            Location = new Point(Pixels(Math.Clamp(note.X, 8, 12000)) + scroll.X, Pixels(Math.Clamp(note.Y, 8, 12000)) + scroll.Y)
+            Size = new Size(Pixels(232), Pixels(174)),
+            Location = new Point(Pixels(Math.Max(8, note.X)) + scroll.X, Pixels(Math.Max(8, note.Y)) + scroll.Y)
         };
         cards.Add(note.Id, card);
         canvas.Controls.Add(card);
@@ -288,147 +571,143 @@ internal sealed class BoardWindow : Form
 
     private Point NextOpenPosition()
     {
-        int inset = Pixels(24);
-        int stepX = Pixels(251);
-        int stepY = Pixels(192);
-        int columns = Math.Max(1, (canvas.ClientSize.Width - inset + Pixels(20)) / stepX);
+        int inset = Pixels(15);
+        int stepX = Pixels(247);
+        int stepY = Pixels(190);
+        int columns = Math.Max(1, canvas.ClientSize.Width / stepX);
         Point scroll = canvas.AutoScrollPosition;
         for (int row = 0; ; row++)
-        {
             for (int column = 0; column < columns; column++)
             {
-                var slot = new Rectangle(inset + column * stepX, inset + row * stepY, Pixels(231), Pixels(172));
-                if (!cards.Values.Any(card => new Rectangle(card.Left - scroll.X, card.Top - scroll.Y, card.Width, card.Height)
-                    .IntersectsWith(slot))) return slot.Location;
+                var slot = new Rectangle(inset + column * stepX, inset + row * stepY, Pixels(232), Pixels(174));
+                if (!cards.Values.Any(card => new Rectangle(card.Left - scroll.X, card.Top - scroll.Y, card.Width, card.Height).IntersectsWith(slot)))
+                    return slot.Location;
             }
-        }
     }
 
-    private int Pixels(int logical) => LogicalToDeviceUnits(logical);
-
-    private Panel CreateEmptyState()
+    private void OpenFloating(StickyNote note, bool activate)
     {
-        var panel = new Panel { Size = new Size(336, 176), BackColor = BoardStyle.Paper, BorderStyle = BorderStyle.FixedSingle };
-        var heading = new Label
+        if (!floating.TryGetValue(note.Id, out FloatingNote? window))
         {
-            Text = "Pin your first note", Font = new Font("Georgia", 17F, FontStyle.Bold), TextAlign = ContentAlignment.MiddleCenter,
-            Location = new Point(0, 31), Size = new Size(334, 37)
-        };
-        var hint = new Label
-        {
-            Text = "Double-click the board to add a note.", ForeColor = BoardStyle.Muted,
-            TextAlign = ContentAlignment.MiddleCenter, Location = new Point(0, 70), Size = new Size(334, 25)
-        };
-        Button first = BoardStyle.Button("New note", BoardStyle.Brick, Color.White);
-        first.Bounds = new Rectangle(114, 112, 106, 34);
-        first.Click += (_, _) => AddNote();
-        panel.Controls.AddRange([heading, hint, first]);
-        panel.Paint += (_, e) => BoardStyle.DrawPin(e.Graphics, new Point(panel.Width / 2, 18));
-        return panel;
-    }
-
-    private void CenterEmptyState() => emptyState.Location = new Point(Math.Max(8, (canvas.ClientSize.Width - emptyState.Width) / 2),
-        Math.Max(8, (canvas.ClientSize.Height - emptyState.Height) / 2));
-
-    private void RefreshCount()
-    {
-        count.Text = data.Notes.Count == 1 ? "1 note" : $"{data.Notes.Count} notes";
-        emptyState.Visible = data.Notes.Count == 0;
-        if (emptyState.Visible) CenterEmptyState();
-    }
-
-    private void HideBoard()
-    {
-        if (!Visible || hidingToTray) return;
-        hidingToTray = true;
-        try
-        {
-            SaveNotes();
-            if (!tray.EnsureRegistered())
+            window = new FloatingNote(this, note, app.Icon, activate);
+            floating.Add(note.Id, window);
+            window.FormClosed += (_, _) =>
             {
-                ShowInTaskbar = true;
-                WindowState = FormWindowState.Minimized;
-                ShowTrayUnavailable();
-                return;
-            }
-
-            Hide();
-            ShowInTaskbar = false;
-            if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
+                floating.Remove(note.Id);
+                if (closing) return;
+                note.PoppedOut = false;
+                app.MarkDirty();
+            };
+            window.Show();
         }
-        finally { hidingToTray = false; }
+        if (!activate) return;
+        if (!window.Visible) window.Show();
+        if (window.WindowState == FormWindowState.Minimized) window.WindowState = FormWindowState.Normal;
+        window.Activate();
+        window.Card.FocusEditor();
     }
 
-    private void RestoreIfTrayUnavailable()
+    private void DrawThreads(Graphics graphics)
     {
-        if (exiting || Visible) return;
-        ShowBoard();
-        ShowTrayUnavailable();
-    }
-
-    private void ShowTrayUnavailable()
-    {
-        saveStatus.ForeColor = BoardStyle.Brick;
-        saveStatus.Text = "Tray icon unavailable. Corkboard is on the taskbar.";
-    }
-
-    private void MarkDirty()
-    {
-        if (exiting) return;
-        dirty = true;
-        saveStatus.ForeColor = BoardStyle.Muted;
-        saveStatus.Text = "Saving…";
-        autosave.Stop();
-        autosave.Start();
-    }
-
-    private bool SaveNotes()
-    {
-        autosave.Stop();
-        if (!dirty) return true;
-        try
+        if (board.Threads.Count == 0) return;
+        graphics.SmoothingMode = SmoothingMode.AntiAlias;
+        using var pen = new Pen(Color.Black, Pixels(2)) { StartCap = LineCap.Round, EndCap = LineCap.Round };
+        foreach (NoteThread thread in board.Threads)
         {
-            store.Save(data);
-            dirty = false;
-            saveStatus.ForeColor = BoardStyle.Muted;
-            saveStatus.Text = "Saved on this PC";
-            return true;
-        }
-        catch (Exception error) when (NoteStore.IsStorageError(error))
-        {
-            saveStatus.ForeColor = BoardStyle.Brick;
-            saveStatus.Text = "Save failed. Changes are still open.";
-            return false;
+            if (!TryEndpoints(thread, out Point start, out Point end)) continue;
+            pen.Color = BoardStyle.ThreadColors[Math.Clamp(thread.Color, 0, BoardStyle.ThreadColors.Length - 1)].Color;
+            graphics.DrawLine(pen, start, end);
         }
     }
 
-    private void ExitApp()
+    private void CanvasClick(object? sender, MouseEventArgs e)
     {
-        if (!SaveNotes() && MessageBox.Show("Corkboard couldn't save the latest changes. Exit anyway?", "Corkboard",
-            MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
-        exiting = true;
-        Close();
+        actions.Visible = false;
+        if (HitThread(e.Location) is not NoteThread thread || selectPin || connectFrom.HasValue) return;
+        foreach (ToolStripItem item in threadMenu.Items.Cast<ToolStripItem>().ToArray()) item.Dispose();
+        for (int i = 0; i < BoardStyle.ThreadColors.Length; i++)
+        {
+            int color = i;
+            var item = new ToolStripMenuItem(BoardStyle.ThreadColors[i].Name) { Checked = thread.Color == i, ForeColor = BoardStyle.ThreadColors[i].Color };
+            if (i == 4) item.ForeColor = BoardStyle.Ink;
+            item.Click += (_, _) => { thread.Color = color; canvas.Invalidate(); app.MarkDirty(); };
+            threadMenu.Items.Add(item);
+        }
+        threadMenu.Items.Add(new ToolStripSeparator());
+        threadMenu.Items.Add("Remove thread", null, (_, _) => { board.Threads.Remove(thread); canvas.Invalidate(); app.MarkDirty(); });
+        threadMenu.Show(canvas, e.Location);
     }
 
-    private void RefreshStartup()
+    private NoteThread? HitThread(Point point) => board.Threads.LastOrDefault(thread =>
     {
-        try { startWithWindows.Checked = Startup.IsEnabled(); }
-        catch (Exception error) when (error is UnauthorizedAccessException or System.Security.SecurityException or IOException)
-        {
-            startWithWindows.Enabled = false;
-        }
+        if (!TryEndpoints(thread, out Point start, out Point end)) return false;
+        double dx = end.X - start.X;
+        double dy = end.Y - start.Y;
+        double squaredLength = dx * dx + dy * dy;
+        if (squaredLength == 0) return false;
+        double t = Math.Clamp(((point.X - start.X) * dx + (point.Y - start.Y) * dy) / squaredLength, 0, 1);
+        double x = point.X - start.X - t * dx;
+        double y = point.Y - start.Y - t * dy;
+        int radius = Pixels(7);
+        return x * x + y * y <= radius * radius;
+    });
+
+    private bool TryEndpoints(NoteThread thread, out Point start, out Point end)
+    {
+        start = end = Point.Empty;
+        if (!cards.TryGetValue(thread.From, out NoteCard? from) || !cards.TryGetValue(thread.To, out NoteCard? to)) return false;
+        start = from.PinPointOnParent;
+        end = to.PinPointOnParent;
+        return true;
     }
 
-    private void ChangeStartup()
+    private void ClearSelectionMode()
     {
-        try
+        if (selectPin || connectFrom.HasValue) notice.Visible = false;
+        selectPin = false;
+        connectFrom = null;
+    }
+
+    private void RememberBounds()
+    {
+        TrackNormalBounds();
+        if (!initialized || (hiddenBounds ?? lastNormalBounds) is not Rectangle wanted || board.Bounds == wanted) return;
+        board.Bounds = wanted;
+        app.MarkDirty();
+    }
+
+    private void TrackNormalBounds()
+    {
+        if (initialized && !hiding && hiddenBounds is null && WindowState == FormWindowState.Normal
+            && Width >= MinimumSize.Width && Height >= MinimumSize.Height)
+            lastNormalBounds = Bounds;
+    }
+
+    private int Pixels(int value) => LogicalToDeviceUnits(value);
+
+    private sealed class BoardSurface : Panel
+    {
+        private readonly Action<Graphics> paintThreads;
+
+        public BoardSurface(Action<Graphics> paintThreads)
         {
-            Startup.SetEnabled(!startWithWindows.Checked);
-            RefreshStartup();
+            this.paintThreads = paintThreads;
+            DoubleBuffered = true;
+            AutoScroll = true;
+            BackColor = BoardStyle.Cork;
+            BackgroundImage = BoardStyle.CorkTile;
+            BackgroundImageLayout = ImageLayout.Tile;
+            AccessibleName = "Corkboard surface";
+            SetStyle(ControlStyles.StandardDoubleClick | ControlStyles.ResizeRedraw, true);
         }
-        catch (Exception error) when (error is UnauthorizedAccessException or System.Security.SecurityException or IOException)
-        {
-            MessageBox.Show(this, "Windows couldn't change the startup setting.", "Corkboard", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-        }
+
+        protected override void OnPaint(PaintEventArgs e) { base.OnPaint(e); paintThreads(e.Graphics); }
+        protected override void OnScroll(ScrollEventArgs e) { base.OnScroll(e); Invalidate(); }
+    }
+
+    private sealed record NoteListItem(StickyNote Note)
+    {
+        public string Caption => !string.IsNullOrWhiteSpace(Note.Label) ? Note.Label
+            : Note.Text.Split(['\r', '\n'], 2)[0].Trim() is { Length: > 0 } first ? first : "Untitled note";
     }
 }

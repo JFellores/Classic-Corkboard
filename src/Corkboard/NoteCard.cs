@@ -1,114 +1,199 @@
+using System.Runtime.InteropServices;
+
 namespace Corkboard;
 
 internal sealed class NoteCard : UserControl
 {
+    private readonly BoardWindow board;
     private readonly StickyNote note;
-    private readonly TextBox editor;
-    private readonly Panel grip;
+    private readonly RichTextBox editor;
+    private readonly Button label;
+    private readonly Button? pin;
+    private readonly Label grip;
     private readonly Panel header;
-    private readonly Button menuButton;
-    private readonly Button? popButton;
+    private readonly Panel toolbar;
+    private readonly Panel writingArea;
+    private readonly List<Button> headerButtons = [];
+    private readonly Dictionary<uint, Button> styleButtons = [];
     private readonly ContextMenuStrip menu = new();
+    private readonly ContextMenuStrip pinMenu = new();
+    private readonly ContextMenuStrip colorMenu = new();
     private readonly ToolTip tips = new();
     private Point? dragStart;
     private Point dragOrigin;
     private bool refreshing;
 
-    public NoteCard(BoardWindow board, StickyNote note, bool floating)
+    public NoteCard(BoardWindow board, StickyNote note, bool floating, Action? moveWindow = null)
     {
+        this.board = board;
         this.note = note;
         Font = board.Font;
         ForeColor = BoardStyle.Ink;
         Padding = new Padding(1, 1, 3, 3);
-        BackColor = Color.FromArgb(121, 81, 54);
+        BackColor = Color.FromArgb(134, 89, 60);
         AccessibleName = floating ? "Floating sticky note" : "Board sticky note";
 
         var paper = new Panel { Dock = DockStyle.Fill };
-        var writingArea = new Panel { Dock = DockStyle.Fill, Padding = new Padding(12, 9, 10, 10) };
-        editor = new TextBox
+        writingArea = new Panel { Dock = DockStyle.Fill, Padding = new Padding(11, 6, 8, 7) };
+        editor = new RichTextBox
         {
-            Multiline = true, AcceptsReturn = true, ScrollBars = ScrollBars.Vertical,
-            Dock = DockStyle.Fill, BorderStyle = BorderStyle.None, Text = note.Text,
-            ForeColor = BoardStyle.Ink, AccessibleName = "Note text", Margin = Padding.Empty
+            Multiline = true, AcceptsTab = false, ScrollBars = RichTextBoxScrollBars.Vertical, DetectUrls = false,
+            Dock = DockStyle.Fill, BorderStyle = BorderStyle.None, ForeColor = BoardStyle.Ink,
+            AccessibleName = "Note text", Margin = Padding.Empty, HideSelection = false
         };
-        editor.TextChanged += (_, _) =>
-        {
-            if (!refreshing) board.ChangeText(note, editor.Text, this);
-        };
+        editor.TextChanged += (_, _) => PublishEdit();
+        editor.SelectionChanged += (_, _) => RefreshFormattingButtons();
         writingArea.Controls.Add(editor);
 
-        header = new Panel { Dock = DockStyle.Top, Height = 31 };
-        grip = new Panel { Dock = DockStyle.Fill, Cursor = floating ? Cursors.Default : Cursors.SizeAll };
-        grip.Paint += (_, e) => BoardStyle.DrawPin(e.Graphics, new Point(16, grip.Height / 2));
-        if (!floating)
+        header = new Panel { Dock = DockStyle.Top, Height = 29 };
+        label = BoardStyle.Button("", BoardStyle.PanelTint, BoardStyle.Ink);
+        label.Dock = DockStyle.Fill;
+        label.TextAlign = ContentAlignment.MiddleLeft;
+        label.AutoEllipsis = true;
+        label.Font = new Font(Font.FontFamily, 9F, FontStyle.Bold);
+        label.AccessibleName = "Edit note label";
+        label.Click += (_, _) => board.EditLabel(note, FindForm() ?? board);
+        headerButtons.Add(label);
+        header.Controls.Add(label);
+
+        grip = new Label
         {
-            tips.SetToolTip(grip, "Drag to move note");
+            Dock = DockStyle.Right, Width = 24, Text = "⠿", TextAlign = ContentAlignment.MiddleCenter,
+            AccessibleName = floating ? "Drag sticky window" : "Drag note"
+        };
+        if (floating)
+        {
+            grip.Cursor = Cursors.SizeAll;
+            grip.MouseDown += (_, e) => { if (e.Button == MouseButtons.Left) moveWindow?.Invoke(); };
+        }
+        else
+        {
             grip.MouseDown += StartDrag;
             grip.MouseMove += MoveDrag;
-            grip.MouseCaptureChanged += (_, _) => FinishDrag(board);
-            grip.MouseUp += (_, _) => FinishDrag(board);
+            grip.MouseCaptureChanged += (_, _) => FinishDrag();
+            grip.MouseUp += (_, _) => FinishDrag();
         }
-
-        menuButton = HeaderButton("⋯", "Note options");
-        menuButton.Click += (_, _) => menu.Show(menuButton, new Point(0, menuButton.Height));
         header.Controls.Add(grip);
+
+        Button options = HeaderButton("⋯", "Note options", DockStyle.Right);
+        options.Click += (_, _) => menu.Show(options, new Point(0, options.Height));
+        header.Controls.Add(options);
         if (!floating)
         {
-            popButton = HeaderButton("↗", "Pop out note");
-            popButton.Click += (_, _) => board.PopOut(note);
-            header.Controls.Add(popButton);
+            pin = HeaderButton("", "Pin note", DockStyle.Left);
+            pin.Paint += (_, e) => BoardStyle.DrawPin(e.Graphics, new Point(pin.Width / 2, pin.Height / 2), note.Pinned);
+            pin.Click += (_, _) =>
+            {
+                if (board.HandlePinSelection(note)) return;
+                if (!note.Pinned) board.SetPinned(note, true);
+                else pinMenu.Show(pin, new Point(0, pin.Height));
+            };
+            header.Controls.Add(pin);
+            pinMenu.Items.Add("Remove pin", null, (_, _) => board.SetPinned(note, false));
+            pinMenu.Items.Add("Add thread", null, (_, _) => board.StartThread(note));
         }
-        header.Controls.Add(menuButton);
 
-        var colors = new ToolStripMenuItem("Note color");
-        for (int index = 0; index < BoardStyle.Colors.Length; index++)
+        toolbar = new Panel { Dock = DockStyle.Top, Height = 25, Padding = new Padding(5, 0, 5, 0) };
+        var tools = new FlowLayoutPanel { Dock = DockStyle.Left, Width = 128, WrapContents = false, Margin = Padding.Empty };
+        AddFormat(tools, "B", "Bold (Ctrl+B)", FontStyle.Bold, 1);
+        AddFormat(tools, "I", "Italic (Ctrl+I)", FontStyle.Italic, 2);
+        AddFormat(tools, "U", "Underline (Ctrl+U)", FontStyle.Underline, 4);
+        AddFormat(tools, "ab", "Strikethrough", FontStyle.Strikeout, 8);
+        Button color = BoardStyle.Button("●", BoardStyle.PanelTint, BoardStyle.Ink);
+        color.Dock = DockStyle.Right;
+        color.Width = 25;
+        color.AccessibleName = "Note color";
+        color.Click += (_, _) => colorMenu.Show(color, new Point(0, color.Height));
+        tips.SetToolTip(color, "Note color");
+        headerButtons.Add(color);
+        toolbar.Controls.Add(tools);
+        toolbar.Controls.Add(color);
+
+        var colorOptions = new ToolStripMenuItem("Note color");
+        for (int i = 0; i < BoardStyle.Colors.Length; i++)
         {
-            int chosenColor = index;
-            var item = new ToolStripMenuItem(BoardStyle.Colors[index].Name);
-            item.Click += (_, _) => board.ChangeColor(note, chosenColor);
-            colors.DropDownItems.Add(item);
+            int chosen = i;
+            colorMenu.Items.Add(BoardStyle.Colors[i].Name, null, (_, _) => board.ChangeColor(note, chosen));
+            colorOptions.DropDownItems.Add(BoardStyle.Colors[i].Name, null, (_, _) => board.ChangeColor(note, chosen));
         }
-        var pin = new ToolStripMenuItem("Keep above other windows");
-        pin.Click += (_, _) => board.TogglePin(note);
-        var returnToBoard = new ToolStripMenuItem("Return to board");
-        returnToBoard.Click += (_, _) => board.ReturnToBoard(note);
-        var delete = new ToolStripMenuItem("Delete note");
-        delete.Click += (_, _) => board.DeleteNote(note, FindForm() ?? board);
-        menu.Items.AddRange([colors, pin, returnToBoard, new ToolStripSeparator(), delete]);
-        menu.Opening += (_, _) =>
-        {
-            pin.Checked = note.PoppedOut && note.AlwaysOnTop;
-            returnToBoard.Visible = note.PoppedOut;
-            for (int index = 0; index < colors.DropDownItems.Count; index++)
-                ((ToolStripMenuItem)colors.DropDownItems[index]).Checked = index == note.Color;
-        };
-        ContextMenuStrip = menu;
-        grip.ContextMenuStrip = menu;
+        colorMenu.Opening += (_, _) => CheckColors(colorMenu.Items);
+        var above = new ToolStripMenuItem("Keep above other windows", null, (_, _) => board.ToggleAlwaysOnTop(note));
+        menu.Items.Add(colorOptions);
+        if (!floating) menu.Items.Add("Pop out note", null, (_, _) => board.PopOut(note));
+        menu.Items.Add(above);
+        menu.Items.Add("Edit label", null, (_, _) => board.EditLabel(note, FindForm() ?? board));
+        menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add("Delete note", null, (_, _) => board.DeleteNote(note, FindForm() ?? board));
+        menu.Opening += (_, _) => { above.Checked = note.PoppedOut && note.AlwaysOnTop; CheckColors(colorOptions.DropDownItems); };
 
         paper.Controls.Add(writingArea);
+        paper.Controls.Add(toolbar);
         paper.Controls.Add(header);
         Controls.Add(paper);
+        RefreshLabel();
+        RefreshPin();
         ApplyColor();
+        ReadText();
     }
+
+    public Point PinPointOnParent => new(Left + Padding.Left + (pin?.Width ?? 28) / 2, Top + Padding.Top + header.Height / 2);
 
     public void FocusEditor() => editor.Focus();
 
-    public void SetText(string text)
+    public void RefreshLabel()
     {
-        if (editor.Text == text) return;
+        label.Text = string.IsNullOrWhiteSpace(note.Label) ? "Add label" : note.Label;
+        tips.SetToolTip(label, string.IsNullOrWhiteSpace(note.Label) ? "Label this note" : note.Label);
+    }
+
+    public void RefreshPin()
+    {
+        if (pin is null) return;
+        pin.AccessibleName = note.Pinned ? "Pinned note options" : "Pin note";
+        tips.SetToolTip(pin, note.Pinned ? "Pinned note options" : "Pin note in place");
+        grip.Cursor = note.Pinned ? Cursors.Default : Cursors.SizeAll;
+        tips.SetToolTip(grip, note.Pinned ? "Unpin to move this note" : "Drag to move note");
+        pin.Invalidate();
+    }
+
+    public void ReadText()
+    {
+        if (editor.Text == note.Text && (note.FormattedText is null || editor.Rtf == note.FormattedText)) return;
         refreshing = true;
-        try { editor.Text = text; }
+        int start = editor.SelectionStart;
+        int length = editor.SelectionLength;
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(note.FormattedText))
+            {
+                try { editor.Rtf = note.FormattedText; }
+                catch (ArgumentException) { editor.Text = note.Text; }
+            }
+            else editor.Text = note.Text;
+            start = Math.Min(start, editor.TextLength);
+            editor.Select(start, Math.Min(length, editor.TextLength - start));
+        }
         finally { refreshing = false; }
+        RefreshFormattingButtons();
     }
 
     public void ApplyColor()
     {
         var color = BoardStyle.Colors[Math.Clamp(note.Color, 0, BoardStyle.Colors.Length - 1)];
         editor.BackColor = color.Paper;
-        editor.Parent!.BackColor = color.Paper;
+        writingArea.BackColor = color.Paper;
         header.BackColor = color.Edge;
-        menuButton.BackColor = color.Edge;
-        if (popButton != null) popButton.BackColor = color.Edge;
+        toolbar.BackColor = color.Paper;
+        foreach (Button button in headerButtons) button.BackColor = button.Parent == toolbar ? color.Paper : color.Edge;
+        RefreshFormattingButtons();
+    }
+
+    protected override bool ProcessCmdKey(ref Message message, Keys keys)
+    {
+        uint effect = keys switch { Keys.Control | Keys.B => 1, Keys.Control | Keys.I => 2, Keys.Control | Keys.U => 4, _ => 0 };
+        if (effect == 0) return base.ProcessCmdKey(ref message, keys);
+        ToggleFormat(effect);
+        return true;
     }
 
     protected override void Dispose(bool disposing)
@@ -117,23 +202,75 @@ internal sealed class NoteCard : UserControl
         {
             tips.Dispose();
             menu.Dispose();
+            pinMenu.Dispose();
+            colorMenu.Dispose();
         }
         base.Dispose(disposing);
     }
 
-    private Button HeaderButton(string text, string label)
+    private Button HeaderButton(string text, string title, DockStyle dock)
     {
-        Button button = BoardStyle.Button(text, Color.Transparent, BoardStyle.Ink);
-        button.Dock = DockStyle.Right;
-        button.Width = 32;
-        button.AccessibleName = label;
-        tips.SetToolTip(button, label);
+        Button button = BoardStyle.Button(text, BoardStyle.PanelTint, BoardStyle.Ink);
+        button.Dock = dock;
+        button.Width = 28;
+        button.AccessibleName = title;
+        tips.SetToolTip(button, title);
+        headerButtons.Add(button);
         return button;
+    }
+
+    private void AddFormat(Control tools, string text, string title, FontStyle style, uint effect)
+    {
+        Button button = BoardStyle.Button(text, BoardStyle.PanelTint, BoardStyle.Ink);
+        button.Size = new Size(27, 24);
+        button.Font = new Font(Font.FontFamily, 9F, style);
+        button.AccessibleName = title;
+        button.Click += (_, _) => ToggleFormat(effect);
+        tips.SetToolTip(button, title);
+        tools.Controls.Add(button);
+        styleButtons.Add(effect, button);
+    }
+
+    private void CheckColors(ToolStripItemCollection items)
+    {
+        for (int i = 0; i < items.Count; i++) if (items[i] is ToolStripMenuItem item) item.Checked = i == note.Color;
+    }
+
+    private void ToggleFormat(uint effect)
+    {
+        editor.Focus();
+        CharFormat current = ReadSelectionFormat();
+        var change = CharFormat.Empty;
+        change.Mask = effect;
+        change.Effects = (current.Mask & current.Effects & effect) == 0 ? effect : 0;
+        SendFormat(editor.Handle, 0x0444, new IntPtr(1), ref change);
+        RefreshFormattingButtons();
+        PublishEdit();
+    }
+
+    private void RefreshFormattingButtons()
+    {
+        if (refreshing || toolbar is null || !editor.IsHandleCreated) return;
+        CharFormat selection = ReadSelectionFormat();
+        foreach ((uint flag, Button button) in styleButtons)
+            button.BackColor = (selection.Mask & selection.Effects & flag) != 0 ? header.BackColor : toolbar.BackColor;
+    }
+
+    private CharFormat ReadSelectionFormat()
+    {
+        CharFormat format = CharFormat.Empty;
+        SendFormat(editor.Handle, 0x043A, new IntPtr(1), ref format);
+        return format;
+    }
+
+    private void PublishEdit()
+    {
+        if (!refreshing) board.ChangeText(note, editor.Text, editor.Rtf ?? "", this);
     }
 
     private void StartDrag(object? sender, MouseEventArgs e)
     {
-        if (e.Button != MouseButtons.Left) return;
+        if (e.Button != MouseButtons.Left || note.Pinned) return;
         BringToFront();
         dragStart = Cursor.Position;
         dragOrigin = Location;
@@ -145,11 +282,11 @@ internal sealed class NoteCard : UserControl
         if (dragStart is not Point start || Parent is not Panel canvas) return;
         Point cursor = Cursor.Position;
         Point scroll = canvas.AutoScrollPosition;
-        Location = new Point(Math.Clamp(dragOrigin.X + cursor.X - start.X - scroll.X, 8, 12000) + scroll.X,
-            Math.Clamp(dragOrigin.Y + cursor.Y - start.Y - scroll.Y, 8, 12000) + scroll.Y);
+        Location = new Point(Math.Max(8, dragOrigin.X + cursor.X - start.X - scroll.X) + scroll.X,
+            Math.Max(8, dragOrigin.Y + cursor.Y - start.Y - scroll.Y) + scroll.Y);
     }
 
-    private void FinishDrag(BoardWindow board)
+    private void FinishDrag()
     {
         if (dragStart is null || Parent is not Panel canvas) return;
         dragStart = null;
@@ -157,4 +294,19 @@ internal sealed class NoteCard : UserControl
         Point scroll = canvas.AutoScrollPosition;
         board.MoveNote(note, Left - scroll.X, Top - scroll.Y);
     }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct CharFormat
+    {
+        public uint Size, Mask, Effects;
+        public int Height, Offset;
+        public uint TextColor;
+        public byte CharacterSet, PitchAndFamily;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string FaceName;
+
+        public static CharFormat Empty => new() { Size = (uint)Marshal.SizeOf<CharFormat>(), FaceName = "" };
+    }
+
+    [DllImport("user32.dll", EntryPoint = "SendMessageW")]
+    private static extern IntPtr SendFormat(IntPtr window, uint message, IntPtr selection, ref CharFormat format);
 }

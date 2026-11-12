@@ -39,14 +39,13 @@ internal static class Program
             return;
         }
 
-        using var board = new BoardWindow(store, data, warning);
-        _ = board.Handle;
+        using var application = new CorkboardApp(store, data, warning);
         RegisteredWaitHandle waiter = ThreadPool.RegisterWaitForSingleObject(showRequest, (_, _) =>
         {
-            try { board.BeginInvoke(board.ShowBoard); }
+            try { application.ReopenFromOtherInstance(); }
             catch (InvalidOperationException) { }
         }, null, Timeout.Infinite, false);
-        try { Application.Run(board); }
+        try { Application.Run(application); }
         finally { waiter.Unregister(null); }
     }
 }
