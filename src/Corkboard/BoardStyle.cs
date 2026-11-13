@@ -31,13 +31,53 @@ internal static class BoardStyle
 
     public static Button Button(string text, Color fill, Color ink)
     {
-        var button = new Button
+        var button = new CommandButton
         {
             Text = text, BackColor = fill, ForeColor = ink, FlatStyle = FlatStyle.Flat,
             Cursor = Cursors.Hand, UseVisualStyleBackColor = false, Margin = Padding.Empty
         };
         button.FlatAppearance.BorderSize = 0;
         return button;
+    }
+
+    public static void RoundCorners(Control control, int radius)
+    {
+        int corner = Math.Min(radius * 2, Math.Min(control.Width, control.Height));
+        if (corner <= 0) return;
+        using var outline = new GraphicsPath();
+        outline.AddArc(0, 0, corner, corner, 180, 90);
+        outline.AddArc(control.Width - corner, 0, corner, corner, 270, 90);
+        outline.AddArc(control.Width - corner, control.Height - corner, corner, corner, 0, 90);
+        outline.AddArc(0, control.Height - corner, corner, corner, 90, 90);
+        outline.CloseFigure();
+        Region? old = control.Region;
+        control.Region = new Region(outline);
+        old?.Dispose();
+    }
+
+    private sealed class CommandButton : Button
+    {
+        protected override void OnSizeChanged(EventArgs e)
+        {
+            base.OnSizeChanged(e);
+            RoundCorners(this, LogicalToDeviceUnits(5));
+        }
+
+        protected override void OnBackColorChanged(EventArgs e)
+        {
+            base.OnBackColorChanged(e);
+            Color tint = ForeColor;
+            Color surface = BackColor;
+            FlatAppearance.MouseOverBackColor = Color.FromArgb(
+                (surface.R * 9 + tint.R) / 10, (surface.G * 9 + tint.G) / 10, (surface.B * 9 + tint.B) / 10);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            if (!Focused || !ShowFocusCues || Width < 10 || Height < 10) return;
+            ControlPaint.DrawFocusRectangle(e.Graphics, Rectangle.Inflate(ClientRectangle, -3, -3), ForeColor, BackColor);
+        }
     }
 
     private static Bitmap CreateCorkTile()

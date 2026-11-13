@@ -38,6 +38,8 @@ internal sealed class StickyNote
     public int Color { get; set; }
     public int X { get; set; }
     public int Y { get; set; }
+    public int CardWidth { get; set; }
+    public int CardHeight { get; set; }
     public bool PoppedOut { get; set; }
     public bool AlwaysOnTop { get; set; }
     public Rectangle? PopupBounds { get; set; }

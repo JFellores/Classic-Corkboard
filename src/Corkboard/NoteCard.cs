@@ -4,6 +4,9 @@ namespace Corkboard;
 
 internal sealed class NoteCard : UserControl
 {
+    public static readonly Size InitialCardSize = new(248, 184);
+    public static readonly Size Smallest = new(224, 144);
+    public static readonly Size Largest = new(1400, 1100);
     private readonly BoardWindow board;
     private readonly StickyNote note;
     private readonly RichTextBox editor;
@@ -13,6 +16,8 @@ internal sealed class NoteCard : UserControl
     private readonly Panel header;
     private readonly Panel toolbar;
     private readonly Panel writingArea;
+    private readonly Panel? resizeFooter;
+    private readonly Button? resizeGrip;
     private readonly List<Button> headerButtons = [];
     private readonly Dictionary<uint, Button> styleButtons = [];
     private readonly ContextMenuStrip menu = new();
@@ -21,6 +26,8 @@ internal sealed class NoteCard : UserControl
     private readonly ToolTip tips = new();
     private Point? dragStart;
     private Point dragOrigin;
+    private Point? resizeStart;
+    private Size resizeOrigin;
     private bool refreshing;
 
     public NoteCard(BoardWindow board, StickyNote note, bool floating, Action? moveWindow = null)
@@ -30,11 +37,11 @@ internal sealed class NoteCard : UserControl
         Font = board.Font;
         ForeColor = BoardStyle.Ink;
         Padding = new Padding(1, 1, 3, 3);
-        BackColor = Color.FromArgb(134, 89, 60);
+        BackColor = Color.FromArgb(142, 96, 63);
         AccessibleName = floating ? "Floating sticky note" : "Board sticky note";
 
         var paper = new Panel { Dock = DockStyle.Fill };
-        writingArea = new Panel { Dock = DockStyle.Fill, Padding = new Padding(11, 6, 8, 7) };
+        writingArea = new Panel { Dock = DockStyle.Fill, Padding = new Padding(12, 6, 10, floating ? 8 : 0) };
         editor = new RichTextBox
         {
             Multiline = true, AcceptsTab = false, ScrollBars = RichTextBoxScrollBars.Vertical, DetectUrls = false,
@@ -45,12 +52,12 @@ internal sealed class NoteCard : UserControl
         editor.SelectionChanged += (_, _) => RefreshFormattingButtons();
         writingArea.Controls.Add(editor);
 
-        header = new Panel { Dock = DockStyle.Top, Height = 29 };
+        header = new Panel { Dock = DockStyle.Top, Height = 32 };
         label = BoardStyle.Button("", BoardStyle.PanelTint, BoardStyle.Ink);
         label.Dock = DockStyle.Fill;
         label.TextAlign = ContentAlignment.MiddleLeft;
         label.AutoEllipsis = true;
-        label.Font = new Font(Font.FontFamily, 9F, FontStyle.Bold);
+        label.Font = new Font("Segoe UI Semibold", 9.5F);
         label.AccessibleName = "Edit note label";
         label.Click += (_, _) => board.EditLabel(note, FindForm() ?? board);
         headerButtons.Add(label);
@@ -80,6 +87,9 @@ internal sealed class NoteCard : UserControl
         header.Controls.Add(options);
         if (!floating)
         {
+            Button pop = HeaderButton("↗", "Pop out note", DockStyle.Right);
+            pop.Click += (_, _) => board.PopOut(note);
+            header.Controls.Add(pop);
             pin = HeaderButton("", "Pin note", DockStyle.Left);
             pin.Paint += (_, e) => BoardStyle.DrawPin(e.Graphics, new Point(pin.Width / 2, pin.Height / 2), note.Pinned);
             pin.Click += (_, _) =>
@@ -93,15 +103,15 @@ internal sealed class NoteCard : UserControl
             pinMenu.Items.Add("Add thread", null, (_, _) => board.StartThread(note));
         }
 
-        toolbar = new Panel { Dock = DockStyle.Top, Height = 25, Padding = new Padding(5, 0, 5, 0) };
-        var tools = new FlowLayoutPanel { Dock = DockStyle.Left, Width = 128, WrapContents = false, Margin = Padding.Empty };
+        toolbar = new Panel { Dock = DockStyle.Top, Height = 31, Padding = new Padding(7, 3, 6, 0) };
+        var tools = new FlowLayoutPanel { Dock = DockStyle.Left, Width = 134, WrapContents = false, Margin = Padding.Empty };
         AddFormat(tools, "B", "Bold (Ctrl+B)", FontStyle.Bold, 1);
         AddFormat(tools, "I", "Italic (Ctrl+I)", FontStyle.Italic, 2);
         AddFormat(tools, "U", "Underline (Ctrl+U)", FontStyle.Underline, 4);
         AddFormat(tools, "ab", "Strikethrough", FontStyle.Strikeout, 8);
         Button color = BoardStyle.Button("●", BoardStyle.PanelTint, BoardStyle.Ink);
         color.Dock = DockStyle.Right;
-        color.Width = 25;
+        color.Width = 29;
         color.AccessibleName = "Note color";
         color.Click += (_, _) => colorMenu.Show(color, new Point(0, color.Height));
         tips.SetToolTip(color, "Note color");
@@ -127,6 +137,26 @@ internal sealed class NoteCard : UserControl
         menu.Opening += (_, _) => { above.Checked = note.PoppedOut && note.AlwaysOnTop; CheckColors(colorOptions.DropDownItems); };
 
         paper.Controls.Add(writingArea);
+        if (!floating)
+        {
+            resizeFooter = new Panel { Dock = DockStyle.Bottom, Height = 23 };
+            resizeGrip = BoardStyle.Button("", BoardStyle.PanelTint, BoardStyle.Ink);
+            resizeGrip.Dock = DockStyle.Right;
+            resizeGrip.Width = 29;
+            resizeGrip.Cursor = Cursors.SizeNWSE;
+            resizeGrip.AccessibleName = "Resize note. Use the arrow keys when focused.";
+            tips.SetToolTip(resizeGrip, "Drag to resize note");
+            resizeGrip.Paint += DrawResizeGrip;
+            resizeGrip.MouseDown += StartResize;
+            resizeGrip.MouseMove += ContinueResize;
+            resizeGrip.MouseUp += (_, _) => FinishResize();
+            resizeGrip.MouseCaptureChanged += (_, _) => FinishResize();
+            resizeGrip.PreviewKeyDown += (_, e) => e.IsInputKey = IsArrow(e.KeyCode);
+            resizeGrip.KeyDown += ResizeWithKeyboard;
+            resizeFooter.Controls.Add(resizeGrip);
+            paper.Controls.Add(resizeFooter);
+            SizeChanged += (_, _) => BoardStyle.RoundCorners(this, LogicalToDeviceUnits(7));
+        }
         paper.Controls.Add(toolbar);
         paper.Controls.Add(header);
         Controls.Add(paper);
@@ -184,6 +214,8 @@ internal sealed class NoteCard : UserControl
         writingArea.BackColor = color.Paper;
         header.BackColor = color.Edge;
         toolbar.BackColor = color.Paper;
+        if (resizeFooter is not null) resizeFooter.BackColor = color.Paper;
+        if (resizeGrip is not null) resizeGrip.BackColor = color.Paper;
         foreach (Button button in headerButtons) button.BackColor = button.Parent == toolbar ? color.Paper : color.Edge;
         RefreshFormattingButtons();
     }
@@ -222,7 +254,8 @@ internal sealed class NoteCard : UserControl
     private void AddFormat(Control tools, string text, string title, FontStyle style, uint effect)
     {
         Button button = BoardStyle.Button(text, BoardStyle.PanelTint, BoardStyle.Ink);
-        button.Size = new Size(27, 24);
+        button.Size = new Size(28, 27);
+        button.Margin = new Padding(0, 0, 3, 0);
         button.Font = new Font(Font.FontFamily, 9F, style);
         button.AccessibleName = title;
         button.Click += (_, _) => ToggleFormat(effect);
@@ -293,6 +326,60 @@ internal sealed class NoteCard : UserControl
         grip.Capture = false;
         Point scroll = canvas.AutoScrollPosition;
         board.MoveNote(note, Left - scroll.X, Top - scroll.Y);
+    }
+
+    private static void DrawResizeGrip(object? sender, PaintEventArgs e)
+    {
+        if (sender is not Control grip) return;
+        using var pen = new Pen(BoardStyle.Muted, 1.3f);
+        e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+        int right = grip.Width - 7;
+        int bottom = grip.Height - 5;
+        e.Graphics.DrawLine(pen, right - 11, bottom, right, bottom - 11);
+        e.Graphics.DrawLine(pen, right - 6, bottom, right, bottom - 6);
+    }
+
+    private void StartResize(object? sender, MouseEventArgs e)
+    {
+        if (e.Button != MouseButtons.Left) return;
+        BringToFront();
+        resizeStart = Cursor.Position;
+        resizeOrigin = Size;
+        resizeGrip!.Capture = true;
+    }
+
+    private void ContinueResize(object? sender, MouseEventArgs e)
+    {
+        if (resizeStart is not Point start) return;
+        Point cursor = Cursor.Position;
+        SetCardSize(resizeOrigin.Width + cursor.X - start.X, resizeOrigin.Height + cursor.Y - start.Y);
+    }
+
+    private void FinishResize()
+    {
+        if (resizeStart is null) return;
+        resizeStart = null;
+        resizeGrip!.Capture = false;
+        board.SaveCardSize(note, Size);
+    }
+
+    private static bool IsArrow(Keys key) => key is Keys.Left or Keys.Right or Keys.Up or Keys.Down;
+
+    private void ResizeWithKeyboard(object? sender, KeyEventArgs e)
+    {
+        if (!IsArrow(e.KeyCode)) return;
+        int step = LogicalToDeviceUnits(e.Shift ? 4 : 16);
+        int width = Width + (e.KeyCode == Keys.Right ? step : e.KeyCode == Keys.Left ? -step : 0);
+        int height = Height + (e.KeyCode == Keys.Down ? step : e.KeyCode == Keys.Up ? -step : 0);
+        SetCardSize(width, height);
+        board.SaveCardSize(note, Size);
+        e.Handled = true;
+    }
+
+    private void SetCardSize(int width, int height)
+    {
+        Size = new Size(Math.Clamp(width, LogicalToDeviceUnits(Smallest.Width), LogicalToDeviceUnits(Largest.Width)),
+            Math.Clamp(height, LogicalToDeviceUnits(Smallest.Height), LogicalToDeviceUnits(Largest.Height)));
     }
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]

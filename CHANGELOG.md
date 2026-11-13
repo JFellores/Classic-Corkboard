@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.0 — Resizable notes and clearer controls
+
+- Added mouse and keyboard resizing for notes, remembered dimensions, and refreshed command spacing and keyboard focus.
+
 ## 0.2.0 — Wooden frames and separate boards
 
 - Added resizable wooden frames, independent corkboards, a saved-notes drawer, lockable pins, colored threads, labels, and rich text.

@@ -46,7 +46,7 @@ internal sealed class BoardWindow : ResizableWindow
         BackColor = BoardStyle.Cork;
         DoubleBuffered = true;
         SetStyle(ControlStyles.ResizeRedraw, true);
-        MinimumSize = new Size(375, 380);
+        MinimumSize = new Size(392, 414);
         ClientSize = new Size(980, 620);
         StartPosition = FormStartPosition.CenterScreen;
         if (board.Bounds is Rectangle previous)
@@ -77,6 +77,7 @@ internal sealed class BoardWindow : ResizableWindow
         {
             if (drawerClip.Visible) { AnimateDrawer(false); return; }
             actions.Visible = !actions.Visible;
+            if (actions.Visible) actions.SelectNextControl(null, true, true, true, true);
         };
         BuildDrawer();
         drawerMotion.Tick += (_, _) => SlideDrawer();
@@ -142,12 +143,13 @@ internal sealed class BoardWindow : ResizableWindow
     protected override bool ProcessCmdKey(ref Message msg, Keys keys)
     {
         if (keys == (Keys.Control | Keys.N)) { AddNote(); return true; }
-        if (keys == (Keys.Control | Keys.B) && !canvas.ContainsFocus) { AnimateDrawer(!drawerClip.Visible); return true; }
+        if (keys == (Keys.Control | Keys.Shift | Keys.B)) { actions.Visible = false; AnimateDrawer(!drawerClip.Visible); return true; }
         if (keys == Keys.Escape && (selectPin || connectFrom.HasValue || actions.Visible || drawerClip.Visible))
         {
             ClearSelectionMode();
             actions.Visible = false;
             AnimateDrawer(false);
+            fab.Focus();
             return true;
         }
         return base.ProcessCmdKey(ref msg, keys);
@@ -228,6 +230,17 @@ internal sealed class BoardWindow : ResizableWindow
         if (note.X == logicalX && note.Y == logicalY) return;
         note.X = logicalX;
         note.Y = logicalY;
+        app.MarkDirty();
+    }
+
+    public void SaveCardSize(StickyNote note, Size size)
+    {
+        int width = (int)Math.Round(size.Width * 96.0 / DeviceDpi);
+        int height = (int)Math.Round(size.Height * 96.0 / DeviceDpi);
+        if (note.CardWidth == width && note.CardHeight == height) return;
+        note.CardWidth = width;
+        note.CardHeight = height;
+        canvas.Invalidate();
         app.MarkDirty();
     }
 
@@ -379,11 +392,12 @@ internal sealed class BoardWindow : ResizableWindow
 
     private Panel BuildActions()
     {
-        var panel = new Panel { BackColor = BoardStyle.Paper, Visible = false, BorderStyle = BorderStyle.FixedSingle };
-        var stack = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false, Padding = new Padding(5) };
+        var panel = new Panel { BackColor = BoardStyle.Paper, Visible = false };
+        var stack = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false, Padding = new Padding(8) };
         Add("＋  Add note", () => AddNote());
         Add("●  Add pin", () => { actions.Visible = false; selectPin = true; connectFrom = null; ShowNotice("Click a note’s pin to lock it. Esc cancels.", true); });
         Add("≡  Corkboards", () => { actions.Visible = false; AnimateDrawer(true); });
+        Separator();
         Add("−  Minimize to tray", MinimizeBoard);
         Add("□  Maximize / restore", () =>
         {
@@ -399,6 +413,7 @@ internal sealed class BoardWindow : ResizableWindow
         });
         startup.Click += (_, _) => UpdateStartupLabel();
         Add("×  Close board", Close);
+        Separator();
         Add("Exit Corkboard", app.Exit);
         panel.VisibleChanged += (_, _) => { if (panel.Visible) UpdateStartupLabel(); };
         panel.Controls.Add(stack);
@@ -407,12 +422,17 @@ internal sealed class BoardWindow : ResizableWindow
         Button Add(string text, Action action)
         {
             Button button = BoardStyle.Button(text, BoardStyle.Paper, BoardStyle.Ink);
-            button.Size = new Size(163, 30);
+            button.Size = new Size(186, 32);
             button.TextAlign = ContentAlignment.MiddleLeft;
-            button.Padding = new Padding(5, 0, 1, 0);
+            button.Padding = new Padding(8, 0, 4, 0);
             button.Click += (_, _) => action();
             stack.Controls.Add(button);
             return button;
+        }
+        void Separator()
+        {
+            var line = new Panel { Size = new Size(166, 1), BackColor = BoardStyle.PanelTint, Margin = new Padding(10, 4, 0, 4), TabStop = false };
+            stack.Controls.Add(line);
         }
         void UpdateStartupLabel()
         {
@@ -431,7 +451,7 @@ internal sealed class BoardWindow : ResizableWindow
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 33));
-        var heading = new Label { Text = "Corkboards", Dock = DockStyle.Fill, Font = new Font("Georgia", 14, FontStyle.Bold) };
+        var heading = new Label { Text = "Corkboards", Dock = DockStyle.Fill, Font = new Font("Segoe UI Semibold", 13F) };
         var header = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty };
         Button dismiss = BoardStyle.Button("×", BoardStyle.Paper, BoardStyle.Ink);
         dismiss.Dock = DockStyle.Right;
@@ -443,16 +463,20 @@ internal sealed class BoardWindow : ResizableWindow
         boardList.DisplayMember = nameof(CorkBoard.Name);
         boardList.SelectedIndexChanged += (_, _) => RefreshSavedNotes();
         boardList.DoubleClick += (_, _) => OpenSelected();
+        boardList.KeyDown += (_, e) => { if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; OpenSelected(); } };
         boardList.Dock = DockStyle.Fill;
         boardList.BackColor = Color.White;
+        boardList.BorderStyle = BorderStyle.FixedSingle;
         savedNotes.DisplayMember = nameof(NoteListItem.Caption);
         savedNotes.Dock = DockStyle.Fill;
         savedNotes.DoubleClick += (_, _) => OpenSavedNote();
-        var notesLabel = new Label { Text = "Saved notes", Dock = DockStyle.Fill, TextAlign = ContentAlignment.BottomLeft };
+        savedNotes.KeyDown += (_, e) => { if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; OpenSavedNote(); } };
+        savedNotes.BorderStyle = BorderStyle.FixedSingle;
+        var notesLabel = new Label { Text = "Saved notes", Dock = DockStyle.Fill, TextAlign = ContentAlignment.BottomLeft, Font = new Font("Segoe UI Semibold", 10F) };
 
         var commands = new FlowLayoutPanel { Dock = DockStyle.Fill, Margin = Padding.Empty, WrapContents = false };
-        AddCommand(commands, "New board", () => app.CreateBoard(this), 86);
-        AddCommand(commands, "Open", OpenSelected, 56);
+        AddCommand(commands, "New board", () => app.CreateBoard(this), 90, true);
+        AddCommand(commands, "Open", OpenSelected, 62);
         AddCommand(commands, "Rename", () => { if (boardList.SelectedItem is CorkBoard selected) app.RenameBoard(this, selected); }, 76);
         var noteCommands = new FlowLayoutPanel { Dock = DockStyle.Fill, Margin = Padding.Empty };
         AddCommand(noteCommands, "Open note", OpenSavedNote, 92);
@@ -465,9 +489,9 @@ internal sealed class BoardWindow : ResizableWindow
         drawer.Controls.Add(layout);
         drawerClip.Controls.Add(drawer);
 
-        void AddCommand(Control group, string text, Action click, int width)
+        void AddCommand(Control group, string text, Action click, int width, bool primary = false)
         {
-            Button button = BoardStyle.Button(text, BoardStyle.PanelTint, BoardStyle.Ink);
+            Button button = BoardStyle.Button(text, primary ? BoardStyle.Brick : BoardStyle.PanelTint, primary ? Color.White : BoardStyle.Ink);
             button.Size = new Size(width, 28);
             button.Margin = new Padding(0, 3, 4, 0);
             button.Click += (_, _) => click();
@@ -516,7 +540,8 @@ internal sealed class BoardWindow : ResizableWindow
         drawer.Left = next - DrawerWidth;
         if (next != (drawerOpening ? DrawerWidth : 0)) return;
         drawerMotion.Stop();
-        if (!drawerOpening) drawerClip.Visible = false;
+        if (drawerOpening) boardList.Focus();
+        else drawerClip.Visible = false;
     }
 
     private void LayoutBoard()
@@ -530,22 +555,25 @@ internal sealed class BoardWindow : ResizableWindow
         Region? previous = fab.Region;
         fab.Region = new Region(shape);
         previous?.Dispose();
-        actions.Bounds = new Rectangle(fab.Left, Math.Max(inset + Pixels(4), fab.Top - Pixels(257)), Pixels(175), Pixels(252));
+        actions.Bounds = new Rectangle(fab.Left, Math.Max(inset + Pixels(4), fab.Top - Pixels(298)), Pixels(202), Pixels(290));
+        BoardStyle.RoundCorners(actions, Pixels(8));
         drawerClip.Location = new Point(fab.Left, inset + Pixels(9));
         drawerClip.Height = Math.Max(0, fab.Top - drawerClip.Top - Pixels(7));
         drawer.Size = new Size(DrawerWidth, drawerClip.Height);
+        BoardStyle.RoundCorners(drawer, Pixels(8));
         notice.Bounds = new Rectangle(inset + Pixels(9), inset + Pixels(8), Math.Max(0, canvas.Width - Pixels(18)), Pixels(27));
     }
 
     private Panel BuildEmptyState()
     {
-        var panel = new Panel { Size = new Size(245, 112), BackColor = BoardStyle.Paper };
-        var label = new Label { Text = "Double-click to add a note", Bounds = new Rectangle(0, 29, 245, 27), TextAlign = ContentAlignment.MiddleCenter };
+        var panel = new Panel { Size = new Size(276, 132), BackColor = BoardStyle.Paper };
+        BoardStyle.RoundCorners(panel, 9);
+        var label = new Label { Text = "Double-click anywhere to add a note", Bounds = new Rectangle(0, 37, 276, 27), TextAlign = ContentAlignment.MiddleCenter, ForeColor = BoardStyle.Muted };
         Button button = BoardStyle.Button("Add note", BoardStyle.Brick, Color.White);
-        button.Bounds = new Rectangle(75, 63, 95, 29);
+        button.Bounds = new Rectangle(83, 77, 110, 34);
         button.Click += (_, _) => AddNote();
         panel.Controls.AddRange([label, button]);
-        panel.Paint += (_, e) => BoardStyle.DrawPin(e.Graphics, new Point(panel.Width / 2, 16));
+        panel.Paint += (_, e) => BoardStyle.DrawPin(e.Graphics, new Point(panel.Width / 2, 22));
         return panel;
     }
 
@@ -560,11 +588,13 @@ internal sealed class BoardWindow : ResizableWindow
         Point scroll = canvas.AutoScrollPosition;
         var card = new NoteCard(this, note, floating: false)
         {
-            Size = new Size(Pixels(232), Pixels(174)),
+            Size = new Size(Pixels(ClampDimension(note.CardWidth, NoteCard.InitialCardSize.Width, NoteCard.Smallest.Width, NoteCard.Largest.Width)),
+                Pixels(ClampDimension(note.CardHeight, NoteCard.InitialCardSize.Height, NoteCard.Smallest.Height, NoteCard.Largest.Height))),
             Location = new Point(Pixels(Math.Max(8, note.X)) + scroll.X, Pixels(Math.Max(8, note.Y)) + scroll.Y)
         };
         cards.Add(note.Id, card);
         canvas.Controls.Add(card);
+        card.SizeChanged += (_, _) => canvas.Invalidate(card.Bounds);
         card.BringToFront();
         return card;
     }
@@ -572,14 +602,14 @@ internal sealed class BoardWindow : ResizableWindow
     private Point NextOpenPosition()
     {
         int inset = Pixels(15);
-        int stepX = Pixels(247);
-        int stepY = Pixels(190);
+        int stepX = Pixels(NoteCard.InitialCardSize.Width + 16);
+        int stepY = Pixels(NoteCard.InitialCardSize.Height + 16);
         int columns = Math.Max(1, canvas.ClientSize.Width / stepX);
         Point scroll = canvas.AutoScrollPosition;
         for (int row = 0; ; row++)
             for (int column = 0; column < columns; column++)
             {
-                var slot = new Rectangle(inset + column * stepX, inset + row * stepY, Pixels(232), Pixels(174));
+                var slot = new Rectangle(inset + column * stepX, inset + row * stepY, Pixels(NoteCard.InitialCardSize.Width), Pixels(NoteCard.InitialCardSize.Height));
                 if (!cards.Values.Any(card => new Rectangle(card.Left - scroll.X, card.Top - scroll.Y, card.Width, card.Height).IntersectsWith(slot)))
                     return slot.Location;
             }
@@ -684,6 +714,7 @@ internal sealed class BoardWindow : ResizableWindow
     }
 
     private int Pixels(int value) => LogicalToDeviceUnits(value);
+    private static int ClampDimension(int value, int fallback, int minimum, int maximum) => value == 0 ? fallback : Math.Clamp(value, minimum, maximum);
 
     private sealed class BoardSurface : Panel
     {

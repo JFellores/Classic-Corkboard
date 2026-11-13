@@ -46,6 +46,16 @@ internal sealed class FloatingNote : ResizableWindow
 
     protected override bool ShowWithoutActivation => !activate;
 
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        base.OnPaint(e);
+        int right = ClientSize.Width - 3;
+        int bottom = ClientSize.Height - 3;
+        using var pen = new Pen(BoardStyle.Muted);
+        e.Graphics.DrawLine(pen, right - 9, bottom, right, bottom - 9);
+        e.Graphics.DrawLine(pen, right - 5, bottom, right, bottom - 5);
+    }
+
     protected override void Dispose(bool disposing)
     {
         if (disposing) actions.Dispose();
