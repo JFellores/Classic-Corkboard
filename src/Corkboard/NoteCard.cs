@@ -101,6 +101,9 @@ internal sealed class NoteCard : UserControl
             header.Controls.Add(pin);
             pinMenu.Items.Add("Remove pin", null, (_, _) => board.SetPinned(note, false));
             pinMenu.Items.Add("Add thread", null, (_, _) => board.StartThread(note));
+            var threadColors = new ToolStripMenuItem("Thread color");
+            pinMenu.Items.Add(threadColors);
+            pinMenu.Opening += (_, _) => board.ListThreadColors(note, threadColors);
         }
 
         toolbar = new Panel { Dock = DockStyle.Top, Height = 31, Padding = new Padding(7, 3, 6, 0) };
@@ -315,8 +318,9 @@ internal sealed class NoteCard : UserControl
         if (dragStart is not Point start || Parent is not Panel canvas) return;
         Point cursor = Cursor.Position;
         Point scroll = canvas.AutoScrollPosition;
-        Location = new Point(Math.Max(8, dragOrigin.X + cursor.X - start.X - scroll.X) + scroll.X,
+        var next = new Point(Math.Max(8, dragOrigin.X + cursor.X - start.X - scroll.X) + scroll.X,
             Math.Max(8, dragOrigin.Y + cursor.Y - start.Y - scroll.Y) + scroll.Y);
+        SetCardBounds(new Rectangle(next, Size));
     }
 
     private void FinishDrag()
@@ -378,8 +382,20 @@ internal sealed class NoteCard : UserControl
 
     private void SetCardSize(int width, int height)
     {
-        Size = new Size(Math.Clamp(width, LogicalToDeviceUnits(Smallest.Width), LogicalToDeviceUnits(Largest.Width)),
+        var size = new Size(Math.Clamp(width, LogicalToDeviceUnits(Smallest.Width), LogicalToDeviceUnits(Largest.Width)),
             Math.Clamp(height, LogicalToDeviceUnits(Smallest.Height), LogicalToDeviceUnits(Largest.Height)));
+        SetCardBounds(new Rectangle(Location, size));
+    }
+
+    private void SetCardBounds(Rectangle next)
+    {
+        Rectangle previous = Bounds;
+        if (previous == next) return;
+        Bounds = next;
+        if (Parent is not Panel canvas) return;
+        // Redraw the exposed cork and thread segments before the next drag frame.
+        canvas.Invalidate(Rectangle.Union(previous, Bounds));
+        canvas.Update();
     }
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.1 — Thread controls and redraws
+
+- Added thread colors to the pin menu and repainted the area exposed when a note moved or resized.
+
 ## 0.3.0 — Resizable notes and clearer controls
 
 - Added mouse and keyboard resizing for notes, remembered dimensions, and refreshed command spacing and keyboard focus.

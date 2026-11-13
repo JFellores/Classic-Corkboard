@@ -58,6 +58,12 @@ internal sealed class BoardWindow : ResizableWindow
 
         canvas = new BoardSurface(DrawThreads);
         canvas.MouseClick += CanvasClick;
+        canvas.MouseMove += (_, e) =>
+        {
+            Cursor desired = !selectPin && !connectFrom.HasValue && board.Threads.Count > 0 && HitThread(e.Location) is not null
+                ? Cursors.Hand : Cursors.Default;
+            if (canvas.Cursor != desired) canvas.Cursor = desired;
+        };
         canvas.MouseDoubleClick += (_, e) =>
         {
             if (e.Button == MouseButtons.Left && HitThread(e.Location) is null && !selectPin && connectFrom is null) AddNote(e.Location);
@@ -298,7 +304,8 @@ internal sealed class BoardWindow : ResizableWindow
         if (connectFrom is Guid source)
         {
             if (source == note.Id) return true;
-            if (!board.Threads.Any(thread => thread.From == source && thread.To == note.Id || thread.From == note.Id && thread.To == source))
+            bool added = !board.Threads.Any(thread => thread.From == source && thread.To == note.Id || thread.From == note.Id && thread.To == source);
+            if (added)
             {
                 SetPinned(note, true);
                 board.Threads.Add(new NoteThread { From = source, To = note.Id });
@@ -306,6 +313,7 @@ internal sealed class BoardWindow : ResizableWindow
                 app.MarkDirty();
             }
             ClearSelectionMode();
+            if (added) ShowNotice("Click the thread or use its pin menu to change its color.");
             return true;
         }
         if (!selectPin) return false;
@@ -319,6 +327,30 @@ internal sealed class BoardWindow : ResizableWindow
         selectPin = false;
         connectFrom = note.Id;
         ShowNotice("Click another note’s pin to connect it. Esc cancels.", true);
+    }
+
+    public void ListThreadColors(StickyNote note, ToolStripMenuItem menu)
+    {
+        ClearMenu(menu.DropDownItems);
+        NoteThread[] connected = board.Threads.Where(thread => thread.From == note.Id || thread.To == note.Id).ToArray();
+        menu.Visible = connected.Length > 0;
+        if (connected.Length == 1)
+        {
+            AddThreadColors(menu.DropDownItems, connected[0]);
+            return;
+        }
+
+        foreach (NoteThread thread in connected)
+        {
+            Guid other = thread.From == note.Id ? thread.To : thread.From;
+            StickyNote? destination = board.Notes.Find(candidate => candidate.Id == other);
+            if (destination is null) continue;
+            string label = new NoteListItem(destination).Caption;
+            if (label.Length > 38) label = label[..37] + "…";
+            var item = new ToolStripMenuItem(label.Replace("&", "&&"));
+            AddThreadColors(item.DropDownItems, thread);
+            menu.DropDownItems.Add(item);
+        }
     }
 
     public void PopOut(StickyNote note)
@@ -594,7 +626,6 @@ internal sealed class BoardWindow : ResizableWindow
         };
         cards.Add(note.Id, card);
         canvas.Controls.Add(card);
-        card.SizeChanged += (_, _) => canvas.Invalidate(card.Bounds);
         card.BringToFront();
         return card;
     }
@@ -654,18 +685,30 @@ internal sealed class BoardWindow : ResizableWindow
     {
         actions.Visible = false;
         if (HitThread(e.Location) is not NoteThread thread || selectPin || connectFrom.HasValue) return;
-        foreach (ToolStripItem item in threadMenu.Items.Cast<ToolStripItem>().ToArray()) item.Dispose();
+        ClearMenu(threadMenu.Items);
+        var heading = new ToolStripLabel("Thread color");
+        threadMenu.Items.Add(heading);
+        AddThreadColors(threadMenu.Items, thread);
+        threadMenu.Items.Add(new ToolStripSeparator());
+        threadMenu.Items.Add("Remove thread", null, (_, _) => { board.Threads.Remove(thread); canvas.Invalidate(); app.MarkDirty(); });
+        threadMenu.Show(canvas, e.Location);
+    }
+
+    private void AddThreadColors(ToolStripItemCollection items, NoteThread thread)
+    {
         for (int i = 0; i < BoardStyle.ThreadColors.Length; i++)
         {
             int color = i;
             var item = new ToolStripMenuItem(BoardStyle.ThreadColors[i].Name) { Checked = thread.Color == i, ForeColor = BoardStyle.ThreadColors[i].Color };
             if (i == 4) item.ForeColor = BoardStyle.Ink;
             item.Click += (_, _) => { thread.Color = color; canvas.Invalidate(); app.MarkDirty(); };
-            threadMenu.Items.Add(item);
+            items.Add(item);
         }
-        threadMenu.Items.Add(new ToolStripSeparator());
-        threadMenu.Items.Add("Remove thread", null, (_, _) => { board.Threads.Remove(thread); canvas.Invalidate(); app.MarkDirty(); });
-        threadMenu.Show(canvas, e.Location);
+    }
+
+    private static void ClearMenu(ToolStripItemCollection items)
+    {
+        foreach (ToolStripItem item in items.Cast<ToolStripItem>().ToArray()) item.Dispose();
     }
 
     private NoteThread? HitThread(Point point) => board.Threads.LastOrDefault(thread =>

@@ -4,15 +4,15 @@
 
 Pin notes to a classic corkboard on your Windows desktop. The app is small, works offline, and saves your board on your PC without an account. Pop out a sticky note when you want it in view, then tuck the board into the tray.
 
-## In v0.3.0
+## In v0.3.1
 
-**Resizable notes and clearer controls.** Added mouse and keyboard resizing for notes, remembered dimensions, and refreshed command spacing and keyboard focus.
+**Thread controls and redraws.** Added thread colors to the pin menu and repainted the area exposed when a note moved or resized.
 
 ## Screenshots
 
-![Sticky notes of different sizes on the board](docs/images/release-0.3.0.jpg)
+![The thread color menu beside a blue connection between two notes](docs/images/release-0.3.1.jpg)
 
-A resized note next to a smaller note. (v0.3.0)
+The color controls for a thread. (v0.3.1)
 
 ![Three sample sticky notes arranged on the corkboard](docs/images/corkboard.jpg)
 
