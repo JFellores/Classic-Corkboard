@@ -21,7 +21,10 @@ internal sealed class BoardWindow : ResizableWindow
     private readonly ToolTip tips = new();
     private readonly System.Windows.Forms.Timer drawerMotion = new() { Interval = 16 };
     private readonly System.Windows.Forms.Timer noticeTimer = new() { Interval = 5000 };
+    private readonly ThreadPointerFilter threadInput;
     private Guid? connectFrom;
+    private Point? threadPointer;
+    private NoteCard? threadTarget;
     private bool selectPin;
     private bool initialized;
     private bool hiding;
@@ -57,6 +60,7 @@ internal sealed class BoardWindow : ResizableWindow
         ResizeEnd += (_, _) => RememberBounds();
 
         canvas = new BoardSurface(DrawThreads);
+        threadInput = new ThreadPointerFilter(this);
         canvas.MouseClick += CanvasClick;
         canvas.MouseMove += (_, e) =>
         {
@@ -71,7 +75,11 @@ internal sealed class BoardWindow : ResizableWindow
         emptyState = BuildEmptyState();
         canvas.Controls.Add(emptyState);
 
-        notice = new Label { Visible = false, TextAlign = ContentAlignment.MiddleCenter, BackColor = BoardStyle.Paper, AutoEllipsis = true };
+        notice = new Label
+        {
+            Visible = false, TextAlign = ContentAlignment.MiddleCenter, BackColor = BoardStyle.Paper,
+            AutoEllipsis = true, Padding = new Padding(8, 0, 8, 0)
+        };
         noticeTimer.Tick += (_, _) => { noticeTimer.Stop(); notice.Visible = false; };
 
         fab = BoardStyle.Button("Board menu", BoardStyle.Paper, BoardStyle.Ink);
@@ -146,10 +154,17 @@ internal sealed class BoardWindow : ResizableWindow
     {
         base.OnFormClosing(e);
         if (e.Cancel) return;
+        ClearSelectionMode();
         RememberBounds();
         app.Save();
         closing = true;
         foreach (FloatingNote popup in floating.Values.ToArray()) popup.Close();
+    }
+
+    protected override void OnDeactivate(EventArgs e)
+    {
+        base.OnDeactivate(e);
+        if (connectFrom.HasValue) ClearSelectionMode();
     }
 
     protected override bool ProcessCmdKey(ref Message msg, Keys keys)
@@ -171,6 +186,7 @@ internal sealed class BoardWindow : ResizableWindow
     {
         if (disposing)
         {
+            if (connectFrom.HasValue) ClearSelectionMode();
             closing = true;
             foreach (FloatingNote popup in floating.Values.ToArray()) popup.Dispose();
             noticeTimer.Dispose();
@@ -202,6 +218,8 @@ internal sealed class BoardWindow : ResizableWindow
     public void ShowNotice(string message, bool stay = false)
     {
         notice.Text = message;
+        tips.SetToolTip(notice, message);
+        LayoutNotice();
         notice.Visible = true;
         noticeTimer.Stop();
         if (!stay) noticeTimer.Start();
@@ -304,6 +322,14 @@ internal sealed class BoardWindow : ResizableWindow
         app.MarkDirty();
     }
 
+    public void ChangePinColor(StickyNote note, int color)
+    {
+        if (note.PinColor == color) return;
+        note.PinColor = color;
+        if (cards.TryGetValue(note.Id, out NoteCard? card)) card.RefreshPin();
+        app.MarkDirty();
+    }
+
     public void SetPinned(StickyNote note, bool pinned)
     {
         if (note.Pinned == pinned) return;
@@ -332,7 +358,6 @@ internal sealed class BoardWindow : ResizableWindow
                 app.MarkDirty();
             }
             ClearSelectionMode();
-            if (added) ShowNotice("Click the thread or use its pin menu to change its color.");
             return true;
         }
         if (!selectPin) return false;
@@ -343,9 +368,12 @@ internal sealed class BoardWindow : ResizableWindow
 
     public void StartThread(StickyNote note)
     {
-        selectPin = false;
+        if (!note.Pinned || !cards.ContainsKey(note.Id)) return;
+        ClearSelectionMode();
         connectFrom = note.Id;
-        ShowNotice("Click another note’s pin to connect it. Esc cancels.", true);
+        Application.AddMessageFilter(threadInput);
+        UpdateThreadPointer(canvas.PointToClient(Cursor.Position));
+        ShowNotice("Click a note · Esc to cancel", true);
     }
 
     public void ListThreadColors(StickyNote note, ToolStripMenuItem menu)
@@ -426,6 +454,7 @@ internal sealed class BoardWindow : ResizableWindow
         try
         {
             actions.Visible = false;
+            ClearSelectionMode();
             RememberBounds();
             if (!app.CanHideInTray(board))
             {
@@ -448,7 +477,7 @@ internal sealed class BoardWindow : ResizableWindow
         var panel = new Panel { BackColor = BoardStyle.Paper, Visible = false };
         var stack = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false, Padding = new Padding(8) };
         Add("＋  Add note", () => AddNote());
-        Add("●  Add pin", () => { actions.Visible = false; selectPin = true; connectFrom = null; ShowNotice("Click a note’s pin to lock it. Esc cancels.", true); });
+        Add("●  Add pin", () => { actions.Visible = false; ClearSelectionMode(); selectPin = true; ShowNotice("Click a pin · Esc to cancel", true); });
         Add("≡  Corkboards", () => { actions.Visible = false; AnimateDrawer(true); });
         Separator();
         Add("−  Minimize to tray", MinimizeBoard);
@@ -623,7 +652,18 @@ internal sealed class BoardWindow : ResizableWindow
         drawerClip.Height = Math.Max(0, fab.Top - drawerClip.Top - Pixels(7));
         drawer.Size = new Size(DrawerWidth, drawerClip.Height);
         BoardStyle.RoundCorners(drawer, Pixels(8));
-        notice.Bounds = new Rectangle(inset + Pixels(9), inset + Pixels(8), Math.Max(0, canvas.Width - Pixels(18)), Pixels(27));
+        LayoutNotice();
+    }
+
+    private void LayoutNotice()
+    {
+        int right = canvas.Right - Pixels(12);
+        int room = Math.Max(1, right - fab.Right - Pixels(10));
+        int measured = TextRenderer.MeasureText(notice.Text, notice.Font).Width + Pixels(24);
+        int width = Math.Min(room, measured);
+        int height = Pixels(28);
+        notice.Bounds = new Rectangle(right - width, fab.Top + (fab.Height - height) / 2, width, height);
+        BoardStyle.RoundCorners(notice, Pixels(14));
     }
 
     private void RefreshMenuButton()
@@ -742,7 +782,7 @@ internal sealed class BoardWindow : ResizableWindow
 
     private void DrawThreads(Graphics graphics)
     {
-        if (board.Threads.Count == 0) return;
+        if (board.Threads.Count == 0 && threadPointer is null) return;
         graphics.SmoothingMode = SmoothingMode.AntiAlias;
         using var pen = new Pen(Color.Black, Pixels(2)) { StartCap = LineCap.Round, EndCap = LineCap.Round };
         foreach (NoteThread thread in board.Threads)
@@ -750,6 +790,12 @@ internal sealed class BoardWindow : ResizableWindow
             if (!TryEndpoints(thread, out Point start, out Point end)) continue;
             pen.Color = BoardStyle.ThreadColors[Math.Clamp(thread.Color, 0, BoardStyle.ThreadColors.Length - 1)].Color;
             graphics.DrawLine(pen, start, end);
+        }
+        if (threadPointer is Point pointer && connectFrom is Guid source && cards.TryGetValue(source, out NoteCard? card))
+        {
+            pen.Color = BoardStyle.ThreadColors[0].Color;
+            pen.DashStyle = DashStyle.Dash;
+            graphics.DrawLine(pen, card.PinPointOnParent, pointer);
         }
     }
 
@@ -810,8 +856,43 @@ internal sealed class BoardWindow : ResizableWindow
     {
         if (selectPin || connectFrom.HasValue) notice.Visible = false;
         selectPin = false;
+        if (!connectFrom.HasValue) return;
         connectFrom = null;
+        Application.RemoveMessageFilter(threadInput);
+        threadPointer = null;
+        threadTarget?.SetConnectionTarget(false);
+        threadTarget = null;
+        canvas.Invalidate();
     }
+
+    private void UpdateThreadPointer(Point wanted)
+    {
+        if (connectFrom is not Guid source || !cards.TryGetValue(source, out NoteCard? from)) return;
+        var next = new Point(Math.Clamp(wanted.X, 0, Math.Max(0, canvas.ClientSize.Width - 1)),
+            Math.Clamp(wanted.Y, 0, Math.Max(0, canvas.ClientSize.Height - 1)));
+        NoteCard? target = TargetAt(wanted);
+        if (target != threadTarget)
+        {
+            threadTarget?.SetConnectionTarget(false);
+            threadTarget = target;
+            target?.SetConnectionTarget(true);
+        }
+        if (threadPointer == next) return;
+        Point anchor = from.PinPointOnParent;
+        if (threadPointer is Point previous) canvas.Invalidate(PreviewBounds(anchor, previous));
+        threadPointer = next;
+        canvas.Invalidate(PreviewBounds(anchor, next));
+    }
+
+    private NoteCard? TargetAt(Point point)
+    {
+        if (!canvas.ClientRectangle.Contains(point)) return null;
+        return canvas.GetChildAtPoint(point, GetChildAtPointSkip.Invisible) is NoteCard card && card.Note.Id != connectFrom ? card : null;
+    }
+
+    private Rectangle PreviewBounds(Point from, Point to) => Rectangle.Inflate(
+        Rectangle.FromLTRB(Math.Min(from.X, to.X), Math.Min(from.Y, to.Y), Math.Max(from.X, to.X) + 1, Math.Max(from.Y, to.Y) + 1),
+        Pixels(4), Pixels(4));
 
     private void RememberBounds()
     {
@@ -829,7 +910,33 @@ internal sealed class BoardWindow : ResizableWindow
     }
 
     private int Pixels(int value) => LogicalToDeviceUnits(value);
+    private bool IsConnecting => connectFrom.HasValue;
     private static int ClampDimension(int value, int fallback, int minimum, int maximum) => value == 0 ? fallback : Math.Clamp(value, minimum, maximum);
+
+    private sealed class ThreadPointerFilter(BoardWindow window) : IMessageFilter
+    {
+        public bool PreFilterMessage(ref Message message)
+        {
+            const int mouseMove = 0x0200, leftDown = 0x0201, leftDoubleClick = 0x0203, rightDown = 0x0204;
+            if (message.Msg is not (mouseMove or leftDown or leftDoubleClick or rightDown) || !window.IsConnecting
+                || Control.FromChildHandle(message.HWnd) is not Control control || control.FindForm() != window) return false;
+
+            Point location = window.canvas.PointToClient(Cursor.Position);
+            if (message.Msg == mouseMove)
+            {
+                window.UpdateThreadPointer(location);
+                return false;
+            }
+            if (control != window.canvas && !window.canvas.Contains(control))
+            {
+                window.ClearSelectionMode();
+                return false;
+            }
+            if (message.Msg == rightDown) window.ClearSelectionMode();
+            else if (window.TargetAt(location) is NoteCard target) window.HandlePinSelection(target.Note);
+            return true;
+        }
+    }
 
     private sealed class BoardSurface : Panel
     {

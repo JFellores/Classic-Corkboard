@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.2 — Pointer-following threads and pin colors
+
+- Previewed threads under the pointer, allowed attachment by clicking a destination card, added independent pin colors, and moved hints below the notes.
+
 ## 0.4.1 — Rounded menus and titleless dialogs
 
 - Restyled popup menus and label dialogs, moved the floating note menu into a footer, and cleared stale corner grip marks on resize.

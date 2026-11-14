@@ -35,6 +35,7 @@ internal sealed class StickyNote
     public string? FormattedText { get; set; }
     public string Label { get; set; } = "";
     public bool Pinned { get; set; }
+    public int PinColor { get; set; }
     public int Color { get; set; }
     public int X { get; set; }
     public int Y { get; set; }

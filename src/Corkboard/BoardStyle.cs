@@ -19,6 +19,12 @@ internal static class BoardStyle
         ("Green", Color.FromArgb(43, 99, 65)), ("Purple", Color.FromArgb(103, 55, 122)),
         ("Cream", Color.FromArgb(255, 242, 199)), ("Charcoal", Color.FromArgb(54, 43, 37))
     ];
+    public static readonly (string Name, Color Color)[] PinColors =
+    [
+        ("Red", Brick), ("Amber", Color.FromArgb(165, 88, 13)),
+        ("Green", Color.FromArgb(41, 108, 70)), ("Blue", Color.FromArgb(36, 91, 153)),
+        ("Purple", Color.FromArgb(105, 58, 144)), ("Charcoal", Color.FromArgb(65, 61, 60))
+    ];
     public static readonly (string Name, Color Paper, Color Edge)[] Colors =
     [
         ("Butter", Color.FromArgb(255, 240, 173), Color.FromArgb(239, 218, 130)),
@@ -104,18 +110,24 @@ internal static class BoardStyle
         return tile;
     }
 
-    public static void DrawPin(Graphics graphics, Point center, bool pinned = true)
+    public static void DrawPin(Graphics graphics, Point center, bool pinned = true, int color = 0, bool target = false)
     {
         graphics.SmoothingMode = SmoothingMode.AntiAlias;
+        Color selected = PinColors[Math.Clamp(color, 0, PinColors.Length - 1)].Color;
+        if (target)
+        {
+            using var indicator = new Pen(Ink, 1.5f);
+            graphics.DrawEllipse(indicator, center.X - 9, center.Y - 9, 18, 18);
+        }
         if (!pinned)
         {
-            using var ring = new Pen(Color.FromArgb(147, 91, 63), 1.5f);
+            using var ring = new Pen(selected, 1.5f);
             graphics.DrawEllipse(ring, center.X - 5, center.Y - 5, 10, 10);
             return;
         }
         using var shadow = new SolidBrush(Color.FromArgb(64, 60, 29, 23));
-        using var pin = new SolidBrush(Brick);
-        using var light = new SolidBrush(Color.FromArgb(208, 115, 95));
+        using var pin = new SolidBrush(selected);
+        using var light = new SolidBrush(Color.FromArgb((selected.R + 255) / 2, (selected.G + 255) / 2, (selected.B + 255) / 2));
         graphics.FillEllipse(shadow, center.X - 3, center.Y - 3, 12, 12);
         graphics.FillEllipse(pin, center.X - 6, center.Y - 6, 12, 12);
         graphics.FillEllipse(light, center.X - 4, center.Y - 4, 5, 5);

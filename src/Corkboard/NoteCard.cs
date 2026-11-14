@@ -29,6 +29,7 @@ internal sealed class NoteCard : UserControl
     private Point? resizeStart;
     private Size resizeOrigin;
     private bool refreshing;
+    private bool connectionTarget;
 
     public NoteCard(BoardWindow board, StickyNote note, bool floating, Action? moveWindow = null)
     {
@@ -91,7 +92,7 @@ internal sealed class NoteCard : UserControl
             pop.Click += (_, _) => board.PopOut(note);
             header.Controls.Add(pop);
             pin = HeaderButton("", "Pin note", DockStyle.Left);
-            pin.Paint += (_, e) => BoardStyle.DrawPin(e.Graphics, new Point(pin.Width / 2, pin.Height / 2), note.Pinned);
+            pin.Paint += (_, e) => BoardStyle.DrawPin(e.Graphics, new Point(pin.Width / 2, pin.Height / 2), note.Pinned, note.PinColor, connectionTarget);
             pin.Click += (_, _) =>
             {
                 if (board.HandlePinSelection(note)) return;
@@ -101,9 +102,22 @@ internal sealed class NoteCard : UserControl
             header.Controls.Add(pin);
             pinMenu.Items.Add("Remove pin", null, (_, _) => board.SetPinned(note, false));
             pinMenu.Items.Add("Add thread", null, (_, _) => board.StartThread(note));
+            var pinColors = new ToolStripMenuItem("Pin color");
+            for (int i = 0; i < BoardStyle.PinColors.Length; i++)
+            {
+                int index = i;
+                var choice = new ToolStripMenuItem(BoardStyle.PinColors[i].Name) { ForeColor = BoardStyle.PinColors[i].Color };
+                choice.Click += (_, _) => board.ChangePinColor(note, index);
+                pinColors.DropDownItems.Add(choice);
+            }
+            pinMenu.Items.Add(pinColors);
             var threadColors = new ToolStripMenuItem("Thread color");
             pinMenu.Items.Add(threadColors);
-            pinMenu.Opening += (_, _) => board.ListThreadColors(note, threadColors);
+            pinMenu.Opening += (_, _) =>
+            {
+                for (int i = 0; i < pinColors.DropDownItems.Count; i++) ((ToolStripMenuItem)pinColors.DropDownItems[i]).Checked = note.PinColor == i;
+                board.ListThreadColors(note, threadColors);
+            };
         }
 
         toolbar = new Panel { Dock = DockStyle.Top, Height = 31, Padding = new Padding(7, 3, 6, 0) };
@@ -170,6 +184,14 @@ internal sealed class NoteCard : UserControl
     }
 
     public Point PinPointOnParent => new(Left + Padding.Left + (pin?.Width ?? 28) / 2, Top + Padding.Top + header.Height / 2);
+    public StickyNote Note => note;
+
+    public void SetConnectionTarget(bool value)
+    {
+        if (connectionTarget == value) return;
+        connectionTarget = value;
+        pin?.Invalidate();
+    }
 
     public void FocusEditor() => editor.Focus();
 
