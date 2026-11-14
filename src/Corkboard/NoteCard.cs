@@ -20,9 +20,9 @@ internal sealed class NoteCard : UserControl
     private readonly Button? resizeGrip;
     private readonly List<Button> headerButtons = [];
     private readonly Dictionary<uint, Button> styleButtons = [];
-    private readonly ContextMenuStrip menu = new();
-    private readonly ContextMenuStrip pinMenu = new();
-    private readonly ContextMenuStrip colorMenu = new();
+    private readonly CorkMenu menu = new();
+    private readonly CorkMenu pinMenu = new();
+    private readonly CorkMenu colorMenu = new();
     private readonly ToolTip tips = new();
     private Point? dragStart;
     private Point dragOrigin;

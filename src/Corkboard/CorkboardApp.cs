@@ -6,7 +6,7 @@ internal sealed class CorkboardApp : ApplicationContext
     private readonly BoardData data;
     private readonly Dictionary<Guid, BoardWindow> openBoards = [];
     private readonly Control dispatcher = new();
-    private readonly ContextMenuStrip trayMenu = new();
+    private readonly CorkMenu trayMenu = new();
     private readonly TrayIcon tray;
     private readonly System.Windows.Forms.Timer autosave = new() { Interval = 480 };
     private bool dirty;
@@ -84,8 +84,7 @@ internal sealed class CorkboardApp : ApplicationContext
     {
         string count = board.Notes.Count == 1 ? "its 1 note" : $"all {board.Notes.Count} notes on it";
         string question = board.Notes.Count == 0 ? $"Delete “{board.Name}”?" : $"Delete “{board.Name}” and {count}?";
-        if (MessageBox.Show(owner, question, "Delete corkboard", MessageBoxButtons.YesNo,
-            MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) == DialogResult.Yes) CommitBoardDeletion(board);
+        if (CorkDialog.Confirm(owner, "Delete corkboard", question, "Delete board")) CommitBoardDeletion(board);
     }
 
     public void DeleteNote(IWin32Window owner, CorkBoard board, StickyNote note)
@@ -93,8 +92,7 @@ internal sealed class CorkboardApp : ApplicationContext
         string name = string.IsNullOrWhiteSpace(note.Label) ? note.Text.Split(['\r', '\n'], 2)[0].Trim() : note.Label;
         if (name.Length > 52) name = name[..51] + "…";
         string target = name.Length == 0 ? "this untitled note" : $"“{name}”";
-        if (MessageBox.Show(owner, $"Delete {target} from “{board.Name}”?", "Delete note", MessageBoxButtons.YesNo,
-            MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) == DialogResult.Yes) CommitNoteDeletion(board, note);
+        if (CorkDialog.Confirm(owner, "Delete note", $"Delete {target} from “{board.Name}”?", "Delete note")) CommitNoteDeletion(board, note);
     }
 
     private void CommitBoardDeletion(CorkBoard board)

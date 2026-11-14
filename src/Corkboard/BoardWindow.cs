@@ -17,7 +17,7 @@ internal sealed class BoardWindow : ResizableWindow
     private readonly ListBox savedNotes = new() { IntegralHeight = false, AccessibleName = "Saved notes" };
     private readonly Label notice;
     private readonly Panel emptyState;
-    private readonly ContextMenuStrip threadMenu = new();
+    private readonly CorkMenu threadMenu = new();
     private readonly ToolTip tips = new();
     private readonly System.Windows.Forms.Timer drawerMotion = new() { Interval = 16 };
     private readonly System.Windows.Forms.Timer noticeTimer = new() { Interval = 5000 };
@@ -300,7 +300,7 @@ internal sealed class BoardWindow : ResizableWindow
         if (note.Color == color) return;
         note.Color = color;
         cards[note.Id].ApplyColor();
-        if (floating.TryGetValue(note.Id, out FloatingNote? popup)) popup.Card.ApplyColor();
+        if (floating.TryGetValue(note.Id, out FloatingNote? popup)) popup.ApplyColor(color);
         app.MarkDirty();
     }
 

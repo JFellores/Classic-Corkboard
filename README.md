@@ -4,15 +4,15 @@
 
 Pin notes to a classic corkboard on your Windows desktop. The app is small, works offline, and saves your board on your PC without an account. Pop out a sticky note when you want it in view, then tuck the board into the tray.
 
-## In v0.4.0
+## In v0.4.1
 
-**Cork boundaries and deletion.** Kept notes within the visible board, refreshed the floating Board menu, and added confirmed deletion for boards and notes.
+**Rounded menus and titleless dialogs.** Restyled popup menus and label dialogs, moved the floating note menu into a footer, and cleared stale corner grip marks on resize.
 
 ## Screenshots
 
-![The Corkboards drawer showing Delete board and Delete note controls](docs/images/release-0.4.0.jpg)
+![A sticky note showing its rounded pin menu](docs/images/release-0.4.1.jpg)
 
-Board and note deletion from the drawer. (v0.4.0)
+The redesigned pin menu. (v0.4.1)
 
 ## Requirements
 

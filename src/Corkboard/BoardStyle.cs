@@ -42,17 +42,24 @@ internal static class BoardStyle
 
     public static void RoundCorners(Control control, int radius)
     {
-        int corner = Math.Min(radius * 2, Math.Min(control.Width, control.Height));
-        if (corner <= 0) return;
-        using var outline = new GraphicsPath();
-        outline.AddArc(0, 0, corner, corner, 180, 90);
-        outline.AddArc(control.Width - corner, 0, corner, corner, 270, 90);
-        outline.AddArc(control.Width - corner, control.Height - corner, corner, corner, 0, 90);
-        outline.AddArc(0, control.Height - corner, corner, corner, 90, 90);
-        outline.CloseFigure();
+        if (control.Width <= 0 || control.Height <= 0) return;
+        using GraphicsPath outline = RoundedOutline(control.ClientRectangle, radius);
         Region? old = control.Region;
         control.Region = new Region(outline);
         old?.Dispose();
+    }
+
+    public static GraphicsPath RoundedOutline(Rectangle bounds, int radius)
+    {
+        var path = new GraphicsPath();
+        int corner = Math.Min(radius * 2, Math.Min(bounds.Width, bounds.Height));
+        if (corner <= 0) { path.AddRectangle(bounds); return path; }
+        path.AddArc(bounds.Left, bounds.Top, corner, corner, 180, 90);
+        path.AddArc(bounds.Right - corner, bounds.Top, corner, corner, 270, 90);
+        path.AddArc(bounds.Right - corner, bounds.Bottom - corner, corner, corner, 0, 90);
+        path.AddArc(bounds.Left, bounds.Bottom - corner, corner, corner, 90, 90);
+        path.CloseFigure();
+        return path;
     }
 
     private sealed class CommandButton : Button

@@ -77,28 +77,3 @@ internal class ResizableWindow : Form
     private static extern IntPtr SendMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
 }
 
-internal static class NamePrompt
-{
-    public static string? Show(IWin32Window owner, string caption, string label, string value, int maxLength)
-    {
-        using var form = new Form
-        {
-            Text = caption, ClientSize = new Size(340, 125), StartPosition = FormStartPosition.CenterParent,
-            FormBorderStyle = FormBorderStyle.FixedDialog, ShowInTaskbar = false, MaximizeBox = false,
-            MinimizeBox = false, AutoScaleMode = AutoScaleMode.Dpi, Font = new Font("Segoe UI", 10F), BackColor = BoardStyle.Paper
-        };
-        var prompt = new Label { Text = label, Location = new Point(14, 12), AutoSize = true };
-        var entry = new TextBox { Text = value, MaxLength = maxLength, Bounds = new Rectangle(14, 37, 310, 25), AccessibleName = label };
-        Button save = BoardStyle.Button("Save", BoardStyle.Brick, Color.White);
-        save.Bounds = new Rectangle(244, 78, 80, 32);
-        save.DialogResult = DialogResult.OK;
-        Button cancel = BoardStyle.Button("Cancel", BoardStyle.PanelTint, BoardStyle.Ink);
-        cancel.Bounds = new Rectangle(154, 78, 80, 32);
-        cancel.DialogResult = DialogResult.Cancel;
-        form.Controls.AddRange([prompt, entry, save, cancel]);
-        form.AcceptButton = save;
-        form.CancelButton = cancel;
-        form.Shown += (_, _) => { entry.Focus(); entry.SelectAll(); };
-        return form.ShowDialog(owner) == DialogResult.OK ? entry.Text.Trim() : null;
-    }
-}

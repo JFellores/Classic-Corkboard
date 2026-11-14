@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.1 — Rounded menus and titleless dialogs
+
+- Restyled popup menus and label dialogs, moved the floating note menu into a footer, and cleared stale corner grip marks on resize.
+
 ## 0.4.0 — Cork boundaries and deletion
 
 - Kept notes within the visible board, refreshed the floating Board menu, and added confirmed deletion for boards and notes.
