@@ -74,11 +74,17 @@ internal sealed class BoardWindow : ResizableWindow
         notice = new Label { Visible = false, TextAlign = ContentAlignment.MiddleCenter, BackColor = BoardStyle.Paper, AutoEllipsis = true };
         noticeTimer.Tick += (_, _) => { noticeTimer.Stop(); notice.Visible = false; };
 
-        fab = BoardStyle.Button("≡", BoardStyle.Brick, Color.White);
-        fab.Font = new Font("Segoe UI", 19F);
+        fab = BoardStyle.Button("Board menu", BoardStyle.Paper, BoardStyle.Ink);
+        fab.Font = new Font("Segoe UI Semibold", 10F);
+        fab.TextAlign = ContentAlignment.MiddleLeft;
+        fab.Padding = new Padding(40, 0, 9, 0);
+        fab.FlatAppearance.BorderSize = 1;
+        fab.FlatAppearance.BorderColor = BoardStyle.PanelTint;
         fab.AccessibleName = "Board actions";
-        tips.SetToolTip(fab, "Board actions");
+        fab.Paint += PaintMenuGlyph;
         actions = BuildActions();
+        actions.VisibleChanged += (_, _) => RefreshMenuButton();
+        drawerClip.VisibleChanged += (_, _) => RefreshMenuButton();
         fab.Click += (_, _) =>
         {
             if (drawerClip.Visible) { AnimateDrawer(false); return; }
@@ -205,7 +211,6 @@ internal sealed class BoardWindow : ResizableWindow
     {
         if (!cards.TryGetValue(note.Id, out NoteCard? card)) return;
         AnimateDrawer(false);
-        canvas.ScrollControlIntoView(card);
         card.BringToFront();
         card.FocusEditor();
     }
@@ -214,13 +219,11 @@ internal sealed class BoardWindow : ResizableWindow
     {
         actions.Visible = false;
         ClearSelectionMode();
-        Point scroll = canvas.AutoScrollPosition;
-        Point position = click is Point point
-            ? new Point(Math.Max(8, point.X - scroll.X - 14), Math.Max(8, point.Y - scroll.Y - 15))
-            : NextOpenPosition();
+        Point position = click is Point point ? new Point(point.X - Pixels(14), point.Y - Pixels(15)) : NextOpenPosition();
         var note = new StickyNote { Color = board.Notes.Count % BoardStyle.Colors.Length };
+        Point fitted = LimitCardMove(position, LimitCardResize(CardArea.Location, DefaultCardSize()));
         board.Notes.Add(note);
-        MoveNote(note, position.X, position.Y);
+        MoveNote(note, fitted.X, fitted.Y);
         AddCard(note);
         UpdateEmptyState();
         FocusNote(note);
@@ -248,6 +251,22 @@ internal sealed class BoardWindow : ResizableWindow
         note.CardHeight = height;
         canvas.Invalidate();
         app.MarkDirty();
+    }
+
+    public Point LimitCardMove(Point wanted, Size size)
+    {
+        Rectangle area = CardArea;
+        return new Point(Math.Clamp(wanted.X, area.Left, Math.Max(area.Left, area.Right - size.Width)),
+            Math.Clamp(wanted.Y, area.Top, Math.Max(area.Top, area.Bottom - size.Height)));
+    }
+
+    public Size LimitCardResize(Point anchor, Size wanted)
+    {
+        Rectangle area = CardArea;
+        int width = Math.Max(1, Math.Min(Pixels(NoteCard.Largest.Width), area.Right - anchor.X));
+        int height = Math.Max(1, Math.Min(Pixels(NoteCard.Largest.Height), area.Bottom - anchor.Y));
+        return new Size(Math.Clamp(wanted.Width, Math.Min(Pixels(NoteCard.Smallest.Width), width), width),
+            Math.Clamp(wanted.Height, Math.Min(Pixels(NoteCard.Smallest.Height), height), height));
     }
 
     public void ChangeText(StickyNote note, string text, string rtf, NoteCard sender)
@@ -376,24 +395,26 @@ internal sealed class BoardWindow : ResizableWindow
 
     public void DeleteNote(StickyNote note, Form owner)
     {
-        if (MessageBox.Show(owner, "Delete this note?", "Corkboard", MessageBoxButtons.YesNo, MessageBoxIcon.Question,
-            MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
-        SetPinned(note, false);
+        app.DeleteNote(owner, board, note);
+    }
+
+    public void RemoveNoteView(StickyNote note)
+    {
+        if (connectFrom == note.Id) ClearSelectionMode();
         if (floating.TryGetValue(note.Id, out FloatingNote? popup)) popup.Close();
         if (cards.Remove(note.Id, out NoteCard? card)) card.Dispose();
-        board.Notes.Remove(note);
         UpdateEmptyState();
-        RefreshSavedNotes();
-        app.MarkDirty();
+        canvas.Invalidate();
     }
 
     public void RefreshBoardList()
     {
         CorkBoard selected = boardList.SelectedItem as CorkBoard ?? board;
+        CorkBoard[] available = app.Boards.ToArray();
         boardList.BeginUpdate();
         boardList.Items.Clear();
-        boardList.Items.AddRange(app.Boards.Cast<object>().ToArray());
-        boardList.SelectedItem = selected;
+        boardList.Items.AddRange(available);
+        boardList.SelectedItem = available.Contains(selected) ? selected : available.Contains(board) ? board : available[0];
         boardList.EndUpdate();
         RefreshSavedNotes();
     }
@@ -476,9 +497,10 @@ internal sealed class BoardWindow : ResizableWindow
 
     private void BuildDrawer()
     {
-        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 6, Padding = new Padding(12) };
+        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 7, Padding = new Padding(12) };
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 31));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 35));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 35));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
@@ -509,21 +531,30 @@ internal sealed class BoardWindow : ResizableWindow
         var commands = new FlowLayoutPanel { Dock = DockStyle.Fill, Margin = Padding.Empty, WrapContents = false };
         AddCommand(commands, "New board", () => app.CreateBoard(this), 90, true);
         AddCommand(commands, "Open", OpenSelected, 62);
-        AddCommand(commands, "Rename", () => { if (boardList.SelectedItem is CorkBoard selected) app.RenameBoard(this, selected); }, 76);
+        var manageBoards = new FlowLayoutPanel { Dock = DockStyle.Fill, Margin = Padding.Empty, WrapContents = false };
+        AddCommand(manageBoards, "Rename", () => { if (boardList.SelectedItem is CorkBoard selected) app.RenameBoard(this, selected); }, 76);
+        AddCommand(manageBoards, "Delete board", () => { if (boardList.SelectedItem is CorkBoard selected) app.DeleteBoard(this, selected); }, 98, destructive: true);
         var noteCommands = new FlowLayoutPanel { Dock = DockStyle.Fill, Margin = Padding.Empty };
         AddCommand(noteCommands, "Open note", OpenSavedNote, 92);
+        AddCommand(noteCommands, "Delete note", () =>
+        {
+            if (boardList.SelectedItem is CorkBoard selected && savedNotes.SelectedItem is NoteListItem item)
+                app.DeleteNote(this, selected, item.Note);
+        }, 96, destructive: true);
         layout.Controls.Add(header, 0, 0);
         layout.Controls.Add(boardList, 0, 1);
         layout.Controls.Add(commands, 0, 2);
-        layout.Controls.Add(notesLabel, 0, 3);
-        layout.Controls.Add(savedNotes, 0, 4);
-        layout.Controls.Add(noteCommands, 0, 5);
+        layout.Controls.Add(manageBoards, 0, 3);
+        layout.Controls.Add(notesLabel, 0, 4);
+        layout.Controls.Add(savedNotes, 0, 5);
+        layout.Controls.Add(noteCommands, 0, 6);
         drawer.Controls.Add(layout);
         drawerClip.Controls.Add(drawer);
 
-        void AddCommand(Control group, string text, Action click, int width, bool primary = false)
+        void AddCommand(Control group, string text, Action click, int width, bool primary = false, bool destructive = false)
         {
-            Button button = BoardStyle.Button(text, primary ? BoardStyle.Brick : BoardStyle.PanelTint, primary ? Color.White : BoardStyle.Ink);
+            Button button = BoardStyle.Button(text, primary ? BoardStyle.Brick : BoardStyle.PanelTint,
+                primary ? Color.White : destructive ? BoardStyle.Brick : BoardStyle.Ink);
             button.Size = new Size(width, 28);
             button.Margin = new Padding(0, 3, 4, 0);
             button.Click += (_, _) => click();
@@ -580,13 +611,12 @@ internal sealed class BoardWindow : ResizableWindow
     {
         int inset = Frame;
         canvas.Bounds = new Rectangle(inset, inset, Math.Max(0, ClientSize.Width - inset * 2), Math.Max(0, ClientSize.Height - inset * 2));
+        if (WindowState != FormWindowState.Minimized && canvas.ClientSize.Width > 0 && canvas.ClientSize.Height > 0)
+            foreach (StickyNote note in board.Notes)
+                if (cards.TryGetValue(note.Id, out NoteCard? card)) card.Bounds = PreferredCardBounds(note);
         emptyState.Location = new Point(Math.Max(8, (canvas.ClientSize.Width - emptyState.Width) / 2), Math.Max(8, (canvas.ClientSize.Height - emptyState.Height) / 2));
-        fab.Bounds = new Rectangle(inset + Pixels(11), Math.Max(inset, ClientSize.Height - inset - Pixels(54)), Pixels(44), Pixels(44));
-        using var shape = new GraphicsPath();
-        shape.AddEllipse(0, 0, fab.Width, fab.Height);
-        Region? previous = fab.Region;
-        fab.Region = new Region(shape);
-        previous?.Dispose();
+        fab.Bounds = new Rectangle(inset + Pixels(12), Math.Max(inset, ClientSize.Height - inset - Pixels(54)), Pixels(145), Pixels(42));
+        BoardStyle.RoundCorners(fab, Pixels(21));
         actions.Bounds = new Rectangle(fab.Left, Math.Max(inset + Pixels(4), fab.Top - Pixels(298)), Pixels(202), Pixels(290));
         BoardStyle.RoundCorners(actions, Pixels(8));
         drawerClip.Location = new Point(fab.Left, inset + Pixels(9));
@@ -594,6 +624,34 @@ internal sealed class BoardWindow : ResizableWindow
         drawer.Size = new Size(DrawerWidth, drawerClip.Height);
         BoardStyle.RoundCorners(drawer, Pixels(8));
         notice.Bounds = new Rectangle(inset + Pixels(9), inset + Pixels(8), Math.Max(0, canvas.Width - Pixels(18)), Pixels(27));
+    }
+
+    private void RefreshMenuButton()
+    {
+        fab.Text = actions.Visible || drawerClip.Visible ? "Close menu" : "Board menu";
+        fab.Invalidate();
+    }
+
+    private void PaintMenuGlyph(object? sender, PaintEventArgs e)
+    {
+        e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+        int centerX = Pixels(21);
+        int centerY = fab.Height / 2;
+        int radius = Pixels(13);
+        using var accent = new SolidBrush(BoardStyle.Brick);
+        using var line = new Pen(Color.White, Pixels(2)) { StartCap = LineCap.Round, EndCap = LineCap.Round };
+        e.Graphics.FillEllipse(accent, centerX - radius, centerY - radius, radius * 2, radius * 2);
+        int stroke = Pixels(4);
+        if (actions.Visible || drawerClip.Visible)
+        {
+            e.Graphics.DrawLine(line, centerX - stroke, centerY - stroke, centerX + stroke, centerY + stroke);
+            e.Graphics.DrawLine(line, centerX - stroke, centerY + stroke, centerX + stroke, centerY - stroke);
+        }
+        else
+        {
+            for (int row = -1; row <= 1; row++)
+                e.Graphics.DrawLine(line, centerX - stroke, centerY + row * stroke, centerX + stroke, centerY + row * stroke);
+        }
     }
 
     private Panel BuildEmptyState()
@@ -617,13 +675,7 @@ internal sealed class BoardWindow : ResizableWindow
 
     private NoteCard AddCard(StickyNote note)
     {
-        Point scroll = canvas.AutoScrollPosition;
-        var card = new NoteCard(this, note, floating: false)
-        {
-            Size = new Size(Pixels(ClampDimension(note.CardWidth, NoteCard.InitialCardSize.Width, NoteCard.Smallest.Width, NoteCard.Largest.Width)),
-                Pixels(ClampDimension(note.CardHeight, NoteCard.InitialCardSize.Height, NoteCard.Smallest.Height, NoteCard.Largest.Height))),
-            Location = new Point(Pixels(Math.Max(8, note.X)) + scroll.X, Pixels(Math.Max(8, note.Y)) + scroll.Y)
-        };
+        var card = new NoteCard(this, note, floating: false) { Bounds = PreferredCardBounds(note) };
         cards.Add(note.Id, card);
         canvas.Controls.Add(card);
         card.BringToFront();
@@ -632,18 +684,38 @@ internal sealed class BoardWindow : ResizableWindow
 
     private Point NextOpenPosition()
     {
-        int inset = Pixels(15);
-        int stepX = Pixels(NoteCard.InitialCardSize.Width + 16);
-        int stepY = Pixels(NoteCard.InitialCardSize.Height + 16);
-        int columns = Math.Max(1, canvas.ClientSize.Width / stepX);
-        Point scroll = canvas.AutoScrollPosition;
-        for (int row = 0; ; row++)
-            for (int column = 0; column < columns; column++)
+        Rectangle area = CardArea;
+        Size size = LimitCardResize(area.Location, DefaultCardSize());
+        int gap = Pixels(14);
+        for (int y = area.Top; y <= area.Bottom - size.Height; y += size.Height + gap)
+            for (int x = area.Left; x <= area.Right - size.Width; x += size.Width + gap)
             {
-                var slot = new Rectangle(inset + column * stepX, inset + row * stepY, Pixels(NoteCard.InitialCardSize.Width), Pixels(NoteCard.InitialCardSize.Height));
-                if (!cards.Values.Any(card => new Rectangle(card.Left - scroll.X, card.Top - scroll.Y, card.Width, card.Height).IntersectsWith(slot)))
-                    return slot.Location;
+                var slot = new Rectangle(new Point(x, y), size);
+                if (!cards.Values.Any(card => card.Bounds.IntersectsWith(slot))) return slot.Location;
             }
+        int offset = Pixels(18) * (cards.Count % 7);
+        return LimitCardMove(new Point(area.Left + offset, area.Top + offset), size);
+    }
+
+    private Rectangle CardArea => new(Pixels(12), Pixels(12), Math.Max(1, canvas.ClientSize.Width - Pixels(24)),
+        Math.Max(1, canvas.ClientSize.Height - Pixels(72)));
+
+    private Size DefaultCardSize() => new(Pixels(NoteCard.InitialCardSize.Width), Pixels(NoteCard.InitialCardSize.Height));
+
+    private Rectangle PreferredCardBounds(StickyNote note)
+    {
+        var position = new Point(Pixels(Math.Clamp(note.X, 0, 16384)), Pixels(Math.Clamp(note.Y, 0, 16384)));
+        var size = new Size(Pixels(ClampDimension(note.CardWidth, NoteCard.InitialCardSize.Width, NoteCard.Smallest.Width, NoteCard.Largest.Width)),
+            Pixels(ClampDimension(note.CardHeight, NoteCard.InitialCardSize.Height, NoteCard.Smallest.Height, NoteCard.Largest.Height)));
+        return FitPreferredCard(position, size);
+    }
+
+    private Rectangle FitPreferredCard(Point location, Size wanted)
+    {
+        Rectangle area = CardArea;
+        var minimum = new Size(Math.Min(Pixels(NoteCard.Smallest.Width), area.Width), Math.Min(Pixels(NoteCard.Smallest.Height), area.Height));
+        Point anchor = LimitCardMove(location, minimum);
+        return new Rectangle(anchor, LimitCardResize(anchor, wanted));
     }
 
     private void OpenFloating(StickyNote note, bool activate)
@@ -767,7 +839,6 @@ internal sealed class BoardWindow : ResizableWindow
         {
             this.paintThreads = paintThreads;
             DoubleBuffered = true;
-            AutoScroll = true;
             BackColor = BoardStyle.Cork;
             BackgroundImage = BoardStyle.CorkTile;
             BackgroundImageLayout = ImageLayout.Tile;
@@ -776,7 +847,6 @@ internal sealed class BoardWindow : ResizableWindow
         }
 
         protected override void OnPaint(PaintEventArgs e) { base.OnPaint(e); paintThreads(e.Graphics); }
-        protected override void OnScroll(ScrollEventArgs e) { base.OnScroll(e); Invalidate(); }
     }
 
     private sealed record NoteListItem(StickyNote Note)

@@ -315,21 +315,19 @@ internal sealed class NoteCard : UserControl
 
     private void MoveDrag(object? sender, MouseEventArgs e)
     {
-        if (dragStart is not Point start || Parent is not Panel canvas) return;
+        if (dragStart is not Point start) return;
         Point cursor = Cursor.Position;
-        Point scroll = canvas.AutoScrollPosition;
-        var next = new Point(Math.Max(8, dragOrigin.X + cursor.X - start.X - scroll.X) + scroll.X,
-            Math.Max(8, dragOrigin.Y + cursor.Y - start.Y - scroll.Y) + scroll.Y);
+        var wanted = new Point(dragOrigin.X + cursor.X - start.X, dragOrigin.Y + cursor.Y - start.Y);
+        Point next = board.LimitCardMove(wanted, Size);
         SetCardBounds(new Rectangle(next, Size));
     }
 
     private void FinishDrag()
     {
-        if (dragStart is null || Parent is not Panel canvas) return;
+        if (dragStart is null) return;
         dragStart = null;
         grip.Capture = false;
-        Point scroll = canvas.AutoScrollPosition;
-        board.MoveNote(note, Left - scroll.X, Top - scroll.Y);
+        board.MoveNote(note, Left, Top);
     }
 
     private static void DrawResizeGrip(object? sender, PaintEventArgs e)
@@ -382,8 +380,7 @@ internal sealed class NoteCard : UserControl
 
     private void SetCardSize(int width, int height)
     {
-        var size = new Size(Math.Clamp(width, LogicalToDeviceUnits(Smallest.Width), LogicalToDeviceUnits(Largest.Width)),
-            Math.Clamp(height, LogicalToDeviceUnits(Smallest.Height), LogicalToDeviceUnits(Largest.Height)));
+        Size size = board.LimitCardResize(Location, new Size(width, height));
         SetCardBounds(new Rectangle(Location, size));
     }
 

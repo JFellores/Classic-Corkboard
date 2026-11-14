@@ -8,6 +8,6 @@
     <Nullable>enable</Nullable>
     <AssemblyName>Corkboard</AssemblyName>
     <ApplicationIcon>corkboard.ico</ApplicationIcon>
-    <Version>0.3.1</Version>
+    <Version>0.4.0</Version>
   </PropertyGroup>
 </Project>

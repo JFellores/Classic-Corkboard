@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.0 — Cork boundaries and deletion
+
+- Kept notes within the visible board, refreshed the floating Board menu, and added confirmed deletion for boards and notes.
+
 ## 0.3.1 — Thread controls and redraws
 
 - Added thread colors to the pin menu and repainted the area exposed when a note moved or resized.

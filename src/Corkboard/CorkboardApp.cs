@@ -80,6 +80,71 @@ internal sealed class CorkboardApp : ApplicationContext
         RefreshLists();
     }
 
+    public void DeleteBoard(IWin32Window owner, CorkBoard board)
+    {
+        string count = board.Notes.Count == 1 ? "its 1 note" : $"all {board.Notes.Count} notes on it";
+        string question = board.Notes.Count == 0 ? $"Delete “{board.Name}”?" : $"Delete “{board.Name}” and {count}?";
+        if (MessageBox.Show(owner, question, "Delete corkboard", MessageBoxButtons.YesNo,
+            MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) == DialogResult.Yes) CommitBoardDeletion(board);
+    }
+
+    public void DeleteNote(IWin32Window owner, CorkBoard board, StickyNote note)
+    {
+        string name = string.IsNullOrWhiteSpace(note.Label) ? note.Text.Split(['\r', '\n'], 2)[0].Trim() : note.Label;
+        if (name.Length > 52) name = name[..51] + "…";
+        string target = name.Length == 0 ? "this untitled note" : $"“{name}”";
+        if (MessageBox.Show(owner, $"Delete {target} from “{board.Name}”?", "Delete note", MessageBoxButtons.YesNo,
+            MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) == DialogResult.Yes) CommitNoteDeletion(board, note);
+    }
+
+    private void CommitBoardDeletion(CorkBoard board)
+    {
+        int index = data.Boards.IndexOf(board);
+        if (index < 0) return;
+        Guid? previouslyActive = data.LastBoard;
+        data.Boards.RemoveAt(index);
+        var replacement = data.Boards.Count == 0 ? new CorkBoard { Name = "My corkboard" } : null;
+        if (replacement is not null) data.Boards.Add(replacement);
+        if (data.LastBoard == board.Id) data.LastBoard = data.Boards[0].Id;
+        MarkDirty();
+        if (!Save())
+        {
+            if (replacement is not null) data.Boards.Remove(replacement);
+            data.Boards.Insert(index, board);
+            data.LastBoard = previouslyActive;
+            MarkDirty();
+            return;
+        }
+
+        if (openBoards.TryGetValue(board.Id, out BoardWindow? removed))
+        {
+            if (openBoards.Count == 1) Open(data.Boards[0]);
+            removed.Close();
+        }
+        RefreshLists();
+    }
+
+    private void CommitNoteDeletion(CorkBoard board, StickyNote note)
+    {
+        int index = board.Notes.IndexOf(note);
+        if (index < 0) return;
+        NoteThread[] previousThreads = board.Threads.ToArray();
+        board.Notes.RemoveAt(index);
+        board.Threads.RemoveAll(thread => thread.From == note.Id || thread.To == note.Id);
+        MarkDirty();
+        if (!Save())
+        {
+            board.Notes.Insert(index, note);
+            board.Threads.Clear();
+            board.Threads.AddRange(previousThreads);
+            MarkDirty();
+            return;
+        }
+
+        if (openBoards.TryGetValue(board.Id, out BoardWindow? window)) window.RemoveNoteView(note);
+        RefreshLists();
+    }
+
     public bool CanHideInTray(CorkBoard board)
     {
         Save();
@@ -156,7 +221,7 @@ internal sealed class CorkboardApp : ApplicationContext
     {
         openBoards.Remove(board.Id);
         minimizedBoards.Remove(board.Id);
-        if (Exiting) return;
+        if (Exiting || !data.Boards.Contains(board)) return;
         board.WasOpen = false;
         MarkDirty();
         Save();
