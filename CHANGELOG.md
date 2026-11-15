@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.0 — Image cards
+
+- Added local image imports, resizing and pop-outs for images, and support for pinning and connecting image cards.
+
 ## 0.4.2 — Pointer-following threads and pin colors
 
 - Previewed threads under the pointer, allowed attachment by clicking a destination card, added independent pin colors, and moved hints below the notes.

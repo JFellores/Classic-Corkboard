@@ -31,6 +31,7 @@ internal sealed class CorkboardApp : ApplicationContext
     }
 
     public Icon Icon { get; } = Icon.ExtractAssociatedIcon(Environment.ProcessPath!) ?? (Icon)SystemIcons.Application.Clone();
+    public ImageLibrary Images => store.Images;
     public IEnumerable<CorkBoard> Boards => data.Boards;
     public bool Exiting { get; private set; }
 

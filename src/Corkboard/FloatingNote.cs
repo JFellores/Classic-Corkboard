@@ -7,7 +7,7 @@ internal sealed class FloatingNote : ResizableWindow
     private readonly Panel footer = new() { Dock = DockStyle.Bottom, Height = 41, Padding = new Padding(8, 5, 8, 6) };
     public NoteCard Card { get; }
 
-    public FloatingNote(BoardWindow board, StickyNote note, Icon icon, bool activate)
+    public FloatingNote(BoardWindow board, StickyNote note, Icon icon, bool activate, Image? image = null)
     {
         this.activate = activate;
         Icon = icon;
@@ -21,7 +21,7 @@ internal sealed class FloatingNote : ResizableWindow
         StartPosition = FormStartPosition.Manual;
         MinimumSize = new Size(205, 155);
         Bounds = FitOnScreen(note.PopupBounds ?? new Rectangle(board.Right - 295, board.Top + 66, 278, 206), MinimumSize, Screen.FromControl(board));
-        Card = new NoteCard(board, note, floating: true, BeginWindowDrag) { Dock = DockStyle.Fill, Padding = Padding.Empty };
+        Card = new NoteCard(board, note, floating: true, BeginWindowDrag, image) { Dock = DockStyle.Fill, Padding = Padding.Empty };
         Controls.Add(Card);
 
         var above = new ToolStripMenuItem("Keep above other windows", null, (_, _) => board.ToggleAlwaysOnTop(note));

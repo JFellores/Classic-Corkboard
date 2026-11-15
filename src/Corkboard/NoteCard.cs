@@ -9,12 +9,12 @@ internal sealed class NoteCard : UserControl
     public static readonly Size Largest = new(1400, 1100);
     private readonly BoardWindow board;
     private readonly StickyNote note;
-    private readonly RichTextBox editor;
+    private readonly RichTextBox? editor;
     private readonly Button label;
     private readonly Button? pin;
     private readonly Label grip;
     private readonly Panel header;
-    private readonly Panel toolbar;
+    private readonly Panel? toolbar;
     private readonly Panel writingArea;
     private readonly Panel? resizeFooter;
     private readonly Button? resizeGrip;
@@ -22,7 +22,7 @@ internal sealed class NoteCard : UserControl
     private readonly Dictionary<uint, Button> styleButtons = [];
     private readonly CorkMenu menu = new();
     private readonly CorkMenu pinMenu = new();
-    private readonly CorkMenu colorMenu = new();
+    private readonly CorkMenu? colorMenu;
     private readonly ToolTip tips = new();
     private Point? dragStart;
     private Point dragOrigin;
@@ -31,7 +31,7 @@ internal sealed class NoteCard : UserControl
     private bool refreshing;
     private bool connectionTarget;
 
-    public NoteCard(BoardWindow board, StickyNote note, bool floating, Action? moveWindow = null)
+    public NoteCard(BoardWindow board, StickyNote note, bool floating, Action? moveWindow = null, Image? image = null)
     {
         this.board = board;
         this.note = note;
@@ -39,19 +39,30 @@ internal sealed class NoteCard : UserControl
         ForeColor = BoardStyle.Ink;
         Padding = new Padding(1, 1, 3, 3);
         BackColor = Color.FromArgb(142, 96, 63);
-        AccessibleName = floating ? "Floating sticky note" : "Board sticky note";
+        bool isImage = note.ImageFile is not null;
+        AccessibleName = isImage ? "Image card" : floating ? "Floating sticky note" : "Board sticky note";
 
         var paper = new Panel { Dock = DockStyle.Fill };
         writingArea = new Panel { Dock = DockStyle.Fill, Padding = new Padding(12, 6, 10, floating ? 8 : 0) };
-        editor = new RichTextBox
+        if (isImage)
         {
-            Multiline = true, AcceptsTab = false, ScrollBars = RichTextBoxScrollBars.Vertical, DetectUrls = false,
-            Dock = DockStyle.Fill, BorderStyle = BorderStyle.None, ForeColor = BoardStyle.Ink,
-            AccessibleName = "Note text", Margin = Padding.Empty, HideSelection = false
-        };
-        editor.TextChanged += (_, _) => PublishEdit();
-        editor.SelectionChanged += (_, _) => RefreshFormattingButtons();
-        writingArea.Controls.Add(editor);
+            writingArea.Padding = new Padding(7, 7, 7, floating ? 7 : 0);
+            if (image is not null)
+                writingArea.Controls.Add(new PictureBox { Image = image, SizeMode = PictureBoxSizeMode.Zoom, Dock = DockStyle.Fill, AccessibleName = "Attached image" });
+            else writingArea.Controls.Add(new Label { Text = "Image unavailable", ForeColor = BoardStyle.Muted, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter });
+        }
+        else
+        {
+            editor = new RichTextBox
+            {
+                Multiline = true, AcceptsTab = false, ScrollBars = RichTextBoxScrollBars.Vertical, DetectUrls = false,
+                Dock = DockStyle.Fill, BorderStyle = BorderStyle.None, ForeColor = BoardStyle.Ink,
+                AccessibleName = "Note text", Margin = Padding.Empty, HideSelection = false
+            };
+            editor.TextChanged += (_, _) => PublishEdit();
+            editor.SelectionChanged += (_, _) => RefreshFormattingButtons();
+            writingArea.Controls.Add(editor);
+        }
 
         header = new Panel { Dock = DockStyle.Top, Height = 32 };
         label = BoardStyle.Button("", BoardStyle.PanelTint, BoardStyle.Ink);
@@ -120,30 +131,34 @@ internal sealed class NoteCard : UserControl
             };
         }
 
-        toolbar = new Panel { Dock = DockStyle.Top, Height = 31, Padding = new Padding(7, 3, 6, 0) };
-        var tools = new FlowLayoutPanel { Dock = DockStyle.Left, Width = 134, WrapContents = false, Margin = Padding.Empty };
-        AddFormat(tools, "B", "Bold (Ctrl+B)", FontStyle.Bold, 1);
-        AddFormat(tools, "I", "Italic (Ctrl+I)", FontStyle.Italic, 2);
-        AddFormat(tools, "U", "Underline (Ctrl+U)", FontStyle.Underline, 4);
-        AddFormat(tools, "ab", "Strikethrough", FontStyle.Strikeout, 8);
-        Button color = BoardStyle.Button("●", BoardStyle.PanelTint, BoardStyle.Ink);
-        color.Dock = DockStyle.Right;
-        color.Width = 29;
-        color.AccessibleName = "Note color";
-        color.Click += (_, _) => colorMenu.Show(color, new Point(0, color.Height));
-        tips.SetToolTip(color, "Note color");
-        headerButtons.Add(color);
-        toolbar.Controls.Add(tools);
-        toolbar.Controls.Add(color);
+        if (!isImage)
+        {
+            colorMenu = new CorkMenu();
+            toolbar = new Panel { Dock = DockStyle.Top, Height = 31, Padding = new Padding(7, 3, 6, 0) };
+            var tools = new FlowLayoutPanel { Dock = DockStyle.Left, Width = 134, WrapContents = false, Margin = Padding.Empty };
+            AddFormat(tools, "B", "Bold (Ctrl+B)", FontStyle.Bold, 1);
+            AddFormat(tools, "I", "Italic (Ctrl+I)", FontStyle.Italic, 2);
+            AddFormat(tools, "U", "Underline (Ctrl+U)", FontStyle.Underline, 4);
+            AddFormat(tools, "ab", "Strikethrough", FontStyle.Strikeout, 8);
+            Button color = BoardStyle.Button("●", BoardStyle.PanelTint, BoardStyle.Ink);
+            color.Dock = DockStyle.Right;
+            color.Width = 29;
+            color.AccessibleName = "Note color";
+            color.Click += (_, _) => colorMenu.Show(color, new Point(0, color.Height));
+            tips.SetToolTip(color, "Note color");
+            headerButtons.Add(color);
+            toolbar.Controls.Add(tools);
+            toolbar.Controls.Add(color);
+        }
 
         var colorOptions = new ToolStripMenuItem("Note color");
         for (int i = 0; i < BoardStyle.Colors.Length; i++)
         {
             int chosen = i;
-            colorMenu.Items.Add(BoardStyle.Colors[i].Name, null, (_, _) => board.ChangeColor(note, chosen));
+            colorMenu?.Items.Add(BoardStyle.Colors[i].Name, null, (_, _) => board.ChangeColor(note, chosen));
             colorOptions.DropDownItems.Add(BoardStyle.Colors[i].Name, null, (_, _) => board.ChangeColor(note, chosen));
         }
-        colorMenu.Opening += (_, _) => CheckColors(colorMenu.Items);
+        if (colorMenu is not null) colorMenu.Opening += (_, _) => CheckColors(colorMenu.Items);
         var above = new ToolStripMenuItem("Keep above other windows", null, (_, _) => board.ToggleAlwaysOnTop(note));
         menu.Items.Add(colorOptions);
         if (!floating) menu.Items.Add("Pop out note", null, (_, _) => board.PopOut(note));
@@ -174,7 +189,7 @@ internal sealed class NoteCard : UserControl
             paper.Controls.Add(resizeFooter);
             SizeChanged += (_, _) => BoardStyle.RoundCorners(this, LogicalToDeviceUnits(7));
         }
-        paper.Controls.Add(toolbar);
+        if (toolbar is not null) paper.Controls.Add(toolbar);
         paper.Controls.Add(header);
         Controls.Add(paper);
         RefreshLabel();
@@ -193,7 +208,11 @@ internal sealed class NoteCard : UserControl
         pin?.Invalidate();
     }
 
-    public void FocusEditor() => editor.Focus();
+    public void FocusEditor()
+    {
+        if (editor is not null) editor.Focus();
+        else label.Focus();
+    }
 
     public void RefreshLabel()
     {
@@ -213,6 +232,7 @@ internal sealed class NoteCard : UserControl
 
     public void ReadText()
     {
+        if (editor is null) return;
         if (editor.Text == note.Text && (note.FormattedText is null || editor.Rtf == note.FormattedText)) return;
         refreshing = true;
         int start = editor.SelectionStart;
@@ -235,10 +255,10 @@ internal sealed class NoteCard : UserControl
     public void ApplyColor()
     {
         var color = BoardStyle.Colors[Math.Clamp(note.Color, 0, BoardStyle.Colors.Length - 1)];
-        editor.BackColor = color.Paper;
+        if (editor is not null) editor.BackColor = color.Paper;
         writingArea.BackColor = color.Paper;
         header.BackColor = color.Edge;
-        toolbar.BackColor = color.Paper;
+        if (toolbar is not null) toolbar.BackColor = color.Paper;
         if (resizeFooter is not null) resizeFooter.BackColor = color.Paper;
         if (resizeGrip is not null) resizeGrip.BackColor = color.Paper;
         foreach (Button button in headerButtons) button.BackColor = button.Parent == toolbar ? color.Paper : color.Edge;
@@ -248,7 +268,7 @@ internal sealed class NoteCard : UserControl
     protected override bool ProcessCmdKey(ref Message message, Keys keys)
     {
         uint effect = keys switch { Keys.Control | Keys.B => 1, Keys.Control | Keys.I => 2, Keys.Control | Keys.U => 4, _ => 0 };
-        if (effect == 0) return base.ProcessCmdKey(ref message, keys);
+        if (effect == 0 || editor is null) return base.ProcessCmdKey(ref message, keys);
         ToggleFormat(effect);
         return true;
     }
@@ -260,7 +280,7 @@ internal sealed class NoteCard : UserControl
             tips.Dispose();
             menu.Dispose();
             pinMenu.Dispose();
-            colorMenu.Dispose();
+            colorMenu?.Dispose();
         }
         base.Dispose(disposing);
     }
@@ -296,8 +316,9 @@ internal sealed class NoteCard : UserControl
 
     private void ToggleFormat(uint effect)
     {
+        if (editor is null) return;
         editor.Focus();
-        CharFormat current = ReadSelectionFormat();
+        CharFormat current = ReadSelectionFormat(editor);
         var change = CharFormat.Empty;
         change.Mask = effect;
         change.Effects = (current.Mask & current.Effects & effect) == 0 ? effect : 0;
@@ -308,13 +329,13 @@ internal sealed class NoteCard : UserControl
 
     private void RefreshFormattingButtons()
     {
-        if (refreshing || toolbar is null || !editor.IsHandleCreated) return;
-        CharFormat selection = ReadSelectionFormat();
+        if (refreshing || toolbar is null || editor is null || !editor.IsHandleCreated) return;
+        CharFormat selection = ReadSelectionFormat(editor);
         foreach ((uint flag, Button button) in styleButtons)
             button.BackColor = (selection.Mask & selection.Effects & flag) != 0 ? header.BackColor : toolbar.BackColor;
     }
 
-    private CharFormat ReadSelectionFormat()
+    private static CharFormat ReadSelectionFormat(RichTextBox editor)
     {
         CharFormat format = CharFormat.Empty;
         SendFormat(editor.Handle, 0x043A, new IntPtr(1), ref format);
@@ -323,7 +344,7 @@ internal sealed class NoteCard : UserControl
 
     private void PublishEdit()
     {
-        if (!refreshing) board.ChangeText(note, editor.Text, editor.Rtf ?? "", this);
+        if (!refreshing && editor is not null) board.ChangeText(note, editor.Text, editor.Rtf ?? "", this);
     }
 
     private void StartDrag(object? sender, MouseEventArgs e)

@@ -2,17 +2,17 @@
 
 [![Windows desktop](https://img.shields.io/badge/Platform-Windows-2775B6)](#requirements) [![MIT license](https://img.shields.io/badge/License-MIT-28704C)](LICENSE)
 
-Pin notes to a classic corkboard on your Windows desktop. The app is small, works offline, and saves your board on your PC without an account. Pop out a sticky note when you want it in view, then tuck the board into the tray.
+Pin notes and photos to a classic corkboard on your Windows desktop. The app is small, works offline, and saves your board on your PC without an account. Pop out a sticky note when you want it in view, then tuck the board into the tray.
 
-## In v0.4.2
+## In v0.5.0
 
-**Pointer-following threads and pin colors.** Previewed threads under the pointer, allowed attachment by clicking a destination card, added independent pin colors, and moved hints below the notes.
+**Image cards.** Added local image imports, resizing and pop-outs for images, and support for pinning and connecting image cards.
 
 ## Screenshots
 
-![A dashed thread preview extending toward a destination note](docs/images/release-0.4.2.jpg)
+![A pinned image card connected to a sticky note](docs/images/release-0.5.0.jpg)
 
-A thread preview before choosing its destination. (v0.4.2)
+An imported image attached to a note. (v0.5.0)
 
 ## Requirements
 
@@ -42,6 +42,7 @@ Open `artifacts\win-x64\Corkboard.exe` on an x64 Windows PC with the .NET 8 Desk
 2. Pop out a reminder to keep it visible while using other apps.
 3. Minimize the board to the Windows notification area. Click the tray icon to bring it back.
 4. Click a note’s pin and choose **Add thread**, then click the destination card. Use **Pin color** or **Thread color** to change them independently.
+5. Choose **Board menu → Add image…** to add a photo you can resize, pin, and connect like a note.
 
 The default data folder is `%LOCALAPPDATA%\Corkboard`. See [.env.example](.env.example) for the optional development override.
 

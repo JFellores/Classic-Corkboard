@@ -34,6 +34,7 @@ internal sealed class StickyNote
     public string Text { get; set; } = "";
     public string? FormattedText { get; set; }
     public string Label { get; set; } = "";
+    public string? ImageFile { get; set; }
     public bool Pinned { get; set; }
     public int PinColor { get; set; }
     public int Color { get; set; }
@@ -55,6 +56,7 @@ internal sealed class NoteThread
 
 internal sealed class NoteStore(string folder)
 {
+    public ImageLibrary Images { get; } = new(Path.Combine(folder, "images"));
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         WriteIndented = true,

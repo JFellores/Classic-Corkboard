@@ -8,6 +8,7 @@ internal sealed class BoardWindow : ResizableWindow
     private readonly CorkBoard board;
     private readonly BoardSurface canvas;
     private readonly Dictionary<Guid, NoteCard> cards = [];
+    private readonly Dictionary<Guid, Image?> images = [];
     private readonly Dictionary<Guid, FloatingNote> floating = [];
     private readonly Button fab;
     private readonly Panel actions;
@@ -195,6 +196,11 @@ internal sealed class BoardWindow : ResizableWindow
             threadMenu.Dispose();
         }
         base.Dispose(disposing);
+        if (disposing)
+        {
+            foreach (Image? image in images.Values) image?.Dispose();
+            images.Clear();
+        }
     }
 
     public void ShowBoard()
@@ -235,11 +241,43 @@ internal sealed class BoardWindow : ResizableWindow
 
     public void AddNote(Point? click = null)
     {
+        AddNewCard(new StickyNote(), click);
+    }
+
+    private void ChooseImage()
+    {
+        actions.Visible = false;
+        using var picker = new OpenFileDialog
+        {
+            Title = "Add image to corkboard", CheckFileExists = true, RestoreDirectory = true,
+            Filter = "Images (*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.tif;*.tiff)|*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.tif;*.tiff"
+        };
+        if (picker.ShowDialog(this) == DialogResult.OK) AddImage(picker.FileName);
+    }
+
+    public void AddImage(string path)
+    {
+        string file;
+        try { file = app.Images.Import(path); }
+        catch (Exception error) when (ImageLibrary.IsImageError(error))
+        {
+            ShowNotice(error is InvalidDataException ? error.Message : "Couldn’t add that image. Try a PNG or JPEG.");
+            return;
+        }
+        string title = Path.GetFileNameWithoutExtension(path).Trim();
+        if (title.Length > 45) title = title[..45];
+        AddNewCard(new StickyNote { ImageFile = file, Label = title, CardWidth = 288, CardHeight = 230 });
+        app.Save();
+    }
+
+    private void AddNewCard(StickyNote note, Point? click = null)
+    {
         actions.Visible = false;
         ClearSelectionMode();
-        Point position = click is Point point ? new Point(point.X - Pixels(14), point.Y - Pixels(15)) : NextOpenPosition();
-        var note = new StickyNote { Color = board.Notes.Count % BoardStyle.Colors.Length };
-        Point fitted = LimitCardMove(position, LimitCardResize(CardArea.Location, DefaultCardSize()));
+        Size size = LimitCardResize(CardArea.Location, PreferredCardSize(note));
+        Point position = click is Point point ? new Point(point.X - Pixels(14), point.Y - Pixels(15)) : NextOpenPosition(size);
+        Point fitted = LimitCardMove(position, size);
+        note.Color = board.Notes.Count % BoardStyle.Colors.Length;
         board.Notes.Add(note);
         MoveNote(note, fitted.X, fitted.Y);
         AddCard(note);
@@ -431,6 +469,7 @@ internal sealed class BoardWindow : ResizableWindow
         if (connectFrom == note.Id) ClearSelectionMode();
         if (floating.TryGetValue(note.Id, out FloatingNote? popup)) popup.Close();
         if (cards.Remove(note.Id, out NoteCard? card)) card.Dispose();
+        if (images.Remove(note.Id, out Image? image)) image?.Dispose();
         UpdateEmptyState();
         canvas.Invalidate();
     }
@@ -477,6 +516,7 @@ internal sealed class BoardWindow : ResizableWindow
         var panel = new Panel { BackColor = BoardStyle.Paper, Visible = false };
         var stack = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false, Padding = new Padding(8) };
         Add("＋  Add note", () => AddNote());
+        Add("▧  Add image…", ChooseImage);
         Add("●  Add pin", () => { actions.Visible = false; ClearSelectionMode(); selectPin = true; ShowNotice("Click a pin · Esc to cancel", true); });
         Add("≡  Corkboards", () => { actions.Visible = false; AnimateDrawer(true); });
         Separator();
@@ -504,7 +544,7 @@ internal sealed class BoardWindow : ResizableWindow
         Button Add(string text, Action action)
         {
             Button button = BoardStyle.Button(text, BoardStyle.Paper, BoardStyle.Ink);
-            button.Size = new Size(186, 32);
+            button.Size = new Size(186, 30);
             button.TextAlign = ContentAlignment.MiddleLeft;
             button.Padding = new Padding(8, 0, 4, 0);
             button.Click += (_, _) => action();
@@ -646,7 +686,7 @@ internal sealed class BoardWindow : ResizableWindow
         emptyState.Location = new Point(Math.Max(8, (canvas.ClientSize.Width - emptyState.Width) / 2), Math.Max(8, (canvas.ClientSize.Height - emptyState.Height) / 2));
         fab.Bounds = new Rectangle(inset + Pixels(12), Math.Max(inset, ClientSize.Height - inset - Pixels(54)), Pixels(145), Pixels(42));
         BoardStyle.RoundCorners(fab, Pixels(21));
-        actions.Bounds = new Rectangle(fab.Left, Math.Max(inset + Pixels(4), fab.Top - Pixels(298)), Pixels(202), Pixels(290));
+        actions.Bounds = new Rectangle(fab.Left, Math.Max(inset + Pixels(4), fab.Top - Pixels(312)), Pixels(202), Pixels(304));
         BoardStyle.RoundCorners(actions, Pixels(8));
         drawerClip.Location = new Point(fab.Left, inset + Pixels(9));
         drawerClip.Height = Math.Max(0, fab.Top - drawerClip.Top - Pixels(7));
@@ -715,17 +755,16 @@ internal sealed class BoardWindow : ResizableWindow
 
     private NoteCard AddCard(StickyNote note)
     {
-        var card = new NoteCard(this, note, floating: false) { Bounds = PreferredCardBounds(note) };
+        var card = new NoteCard(this, note, floating: false, image: ReadImage(note)) { Bounds = PreferredCardBounds(note) };
         cards.Add(note.Id, card);
         canvas.Controls.Add(card);
         card.BringToFront();
         return card;
     }
 
-    private Point NextOpenPosition()
+    private Point NextOpenPosition(Size size)
     {
         Rectangle area = CardArea;
-        Size size = LimitCardResize(area.Location, DefaultCardSize());
         int gap = Pixels(14);
         for (int y = area.Top; y <= area.Bottom - size.Height; y += size.Height + gap)
             for (int x = area.Left; x <= area.Right - size.Width; x += size.Width + gap)
@@ -740,14 +779,21 @@ internal sealed class BoardWindow : ResizableWindow
     private Rectangle CardArea => new(Pixels(12), Pixels(12), Math.Max(1, canvas.ClientSize.Width - Pixels(24)),
         Math.Max(1, canvas.ClientSize.Height - Pixels(72)));
 
-    private Size DefaultCardSize() => new(Pixels(NoteCard.InitialCardSize.Width), Pixels(NoteCard.InitialCardSize.Height));
+    private Size PreferredCardSize(StickyNote note) => new(
+        Pixels(ClampDimension(note.CardWidth, NoteCard.InitialCardSize.Width, NoteCard.Smallest.Width, NoteCard.Largest.Width)),
+        Pixels(ClampDimension(note.CardHeight, NoteCard.InitialCardSize.Height, NoteCard.Smallest.Height, NoteCard.Largest.Height)));
 
     private Rectangle PreferredCardBounds(StickyNote note)
     {
         var position = new Point(Pixels(Math.Clamp(note.X, 0, 16384)), Pixels(Math.Clamp(note.Y, 0, 16384)));
-        var size = new Size(Pixels(ClampDimension(note.CardWidth, NoteCard.InitialCardSize.Width, NoteCard.Smallest.Width, NoteCard.Largest.Width)),
-            Pixels(ClampDimension(note.CardHeight, NoteCard.InitialCardSize.Height, NoteCard.Smallest.Height, NoteCard.Largest.Height)));
-        return FitPreferredCard(position, size);
+        return FitPreferredCard(position, PreferredCardSize(note));
+    }
+
+    private Image? ReadImage(StickyNote note)
+    {
+        if (note.ImageFile is null) return null;
+        if (!images.TryGetValue(note.Id, out Image? image)) images[note.Id] = image = app.Images.Load(note.ImageFile);
+        return image;
     }
 
     private Rectangle FitPreferredCard(Point location, Size wanted)
@@ -762,7 +808,7 @@ internal sealed class BoardWindow : ResizableWindow
     {
         if (!floating.TryGetValue(note.Id, out FloatingNote? window))
         {
-            window = new FloatingNote(this, note, app.Icon, activate);
+            window = new FloatingNote(this, note, app.Icon, activate, ReadImage(note));
             floating.Add(note.Id, window);
             window.FormClosed += (_, _) =>
             {
@@ -959,6 +1005,6 @@ internal sealed class BoardWindow : ResizableWindow
     private sealed record NoteListItem(StickyNote Note)
     {
         public string Caption => !string.IsNullOrWhiteSpace(Note.Label) ? Note.Label
-            : Note.Text.Split(['\r', '\n'], 2)[0].Trim() is { Length: > 0 } first ? first : "Untitled note";
+            : Note.ImageFile is not null ? "Image" : Note.Text.Split(['\r', '\n'], 2)[0].Trim() is { Length: > 0 } first ? first : "Untitled note";
     }
 }
