@@ -51,6 +51,10 @@ Open `artifacts\win-x64\Corkboard.exe` on an x64 Windows PC with the .NET 8 Desk
 - **Connect two cards.** Click the first card’s pin to pin it, open its pin menu, and choose **Add thread**. A preview follows the pointer. Click the destination card to connect it, or press **Esc** to cancel.
 - **Change colors or remove a thread.** Open the pin menu for **Pin color**. Click a thread to select its color or remove it.
 
+![Pin menu open on a photo card, showing Add thread and color options](docs/images/pin-menu.jpg)
+
+![The thread preview follows the pointer from a photo card to a sticky note, then connects the two pins](docs/images/connect-cards.gif)
+
 ### Images
 
 - Choose **Board menu → Add image…** and select a local photo. Resize it with the corner grip. Pin, connect, or pop out the image using the card controls.
