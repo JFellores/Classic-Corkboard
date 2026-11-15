@@ -4,15 +4,15 @@
 
 Pin notes and photos to a classic corkboard on your Windows desktop. The app is small, works offline, and saves your board on your PC without an account. Pop out a sticky note when you want it in view, then tuck the board into the tray.
 
-## In v0.5.0
+## In v0.5.1
 
-**Image cards.** Added local image imports, resizing and pop-outs for images, and support for pinning and connecting image cards.
+**Instant-photo frames.** Gave image cards cream paper borders, bottom captions, and centered pins.
 
 ## Screenshots
 
-![A pinned image card connected to a sticky note](docs/images/release-0.5.0.jpg)
+![An instant-photo card connected to a note](docs/images/release-0.5.1.jpg)
 
-An imported image attached to a note. (v0.5.0)
+The instant-photo frame and bottom caption. (v0.5.1)
 
 ## Requirements
 
@@ -58,6 +58,7 @@ Open `artifacts\win-x64\Corkboard.exe` on an x64 Windows PC with the .NET 8 Desk
 ### Images
 
 - Choose **Board menu → Add image…** and select a local photo. Resize it with the corner grip. Pin, connect, or pop out the image using the card controls.
+- Image cards use an instant-photo frame with a bottom caption and a centered pin. Click the caption to edit it.
 
 ### Local storage and backups
 

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.1 — Instant-photo frames
+
+- Gave image cards cream paper borders, bottom captions, and centered pins.
+
 ## 0.5.0 — Image cards
 
 - Added local image imports, resizing and pop-outs for images, and support for pinning and connecting image cards.

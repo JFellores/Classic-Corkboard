@@ -3,6 +3,7 @@ namespace Corkboard;
 internal sealed class FloatingNote : ResizableWindow
 {
     private readonly bool activate;
+    private readonly bool photo;
     private readonly CorkMenu actions = new();
     private readonly Panel footer = new() { Dock = DockStyle.Bottom, Height = 41, Padding = new Padding(8, 5, 8, 6) };
     public NoteCard Card { get; }
@@ -10,6 +11,7 @@ internal sealed class FloatingNote : ResizableWindow
     public FloatingNote(BoardWindow board, StickyNote note, Icon icon, bool activate, Image? image = null)
     {
         this.activate = activate;
+        photo = note.ImageFile is not null;
         Icon = icon;
         Text = string.IsNullOrWhiteSpace(note.Label) ? "Sticky note" : note.Label;
         Font = board.Font;
@@ -20,7 +22,9 @@ internal sealed class FloatingNote : ResizableWindow
         Padding = new Padding(8);
         StartPosition = FormStartPosition.Manual;
         MinimumSize = new Size(205, 155);
-        Bounds = FitOnScreen(note.PopupBounds ?? new Rectangle(board.Right - 295, board.Top + 66, 278, 206), MinimumSize, Screen.FromControl(board));
+        int width = photo ? Math.Clamp(note.CardWidth + 12, 258, 400) : 278;
+        int height = photo ? Math.Clamp(note.CardHeight + 32, 238, 450) : 206;
+        Bounds = FitOnScreen(note.PopupBounds ?? new Rectangle(board.Right - width - 17, board.Top + 66, width, height), MinimumSize, Screen.FromControl(board));
         Card = new NoteCard(board, note, floating: true, BeginWindowDrag, image) { Dock = DockStyle.Fill, Padding = Padding.Empty };
         Controls.Add(Card);
 
@@ -52,8 +56,8 @@ internal sealed class FloatingNote : ResizableWindow
     public void ApplyColor(int index)
     {
         var color = BoardStyle.Colors[Math.Clamp(index, 0, BoardStyle.Colors.Length - 1)];
-        BackColor = color.Edge;
-        footer.BackColor = color.Paper;
+        BackColor = photo ? BoardStyle.PhotoPaper(index) : color.Edge;
+        footer.BackColor = photo ? BackColor : color.Paper;
         Card.ApplyColor();
     }
 

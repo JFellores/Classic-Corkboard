@@ -46,6 +46,14 @@ internal static class BoardStyle
         return button;
     }
 
+    public const int Linen = 5;
+
+    public static Color PhotoPaper(int color)
+    {
+        Color tint = Colors[Math.Clamp(color, 0, Colors.Length - 1)].Paper;
+        return Color.FromArgb((249 * 4 + tint.R) / 5, (244 * 4 + tint.G) / 5, (229 * 4 + tint.B) / 5);
+    }
+
     public static void RoundCorners(Control control, int radius)
     {
         if (control.Width <= 0 || control.Height <= 0) return;

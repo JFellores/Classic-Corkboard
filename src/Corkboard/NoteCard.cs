@@ -14,6 +14,7 @@ internal sealed class NoteCard : UserControl
     private readonly Button? pin;
     private readonly Label grip;
     private readonly Panel header;
+    private readonly Panel? photoCaption;
     private readonly Panel? toolbar;
     private readonly Panel writingArea;
     private readonly Panel? resizeFooter;
@@ -46,9 +47,13 @@ internal sealed class NoteCard : UserControl
         writingArea = new Panel { Dock = DockStyle.Fill, Padding = new Padding(12, 6, 10, floating ? 8 : 0) };
         if (isImage)
         {
-            writingArea.Padding = new Padding(7, 7, 7, floating ? 7 : 0);
+            writingArea.Padding = new Padding(11, 0, 11, 0);
             if (image is not null)
-                writingArea.Controls.Add(new PictureBox { Image = image, SizeMode = PictureBoxSizeMode.Zoom, Dock = DockStyle.Fill, AccessibleName = "Attached image" });
+            {
+                var print = new PictureBox { Image = image, SizeMode = PictureBoxSizeMode.Zoom, Dock = DockStyle.Fill, AccessibleName = "Attached image" };
+                print.Paint += DrawPhotoEdge;
+                writingArea.Controls.Add(print);
+            }
             else writingArea.Controls.Add(new Label { Text = "Image unavailable", ForeColor = BoardStyle.Muted, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter });
         }
         else
@@ -64,16 +69,18 @@ internal sealed class NoteCard : UserControl
             writingArea.Controls.Add(editor);
         }
 
-        header = new Panel { Dock = DockStyle.Top, Height = 32 };
+        header = new Panel { Dock = DockStyle.Top, Height = isImage ? (floating ? 11 : 25) : 32 };
+        if (isImage) photoCaption = new Panel { Dock = DockStyle.Bottom, Height = 36, Padding = new Padding(7, 3, 3, 0) };
+        Panel commands = photoCaption ?? header;
         label = BoardStyle.Button("", BoardStyle.PanelTint, BoardStyle.Ink);
         label.Dock = DockStyle.Fill;
         label.TextAlign = ContentAlignment.MiddleLeft;
         label.AutoEllipsis = true;
-        label.Font = new Font("Segoe UI Semibold", 9.5F);
+        label.Font = isImage ? new Font("Segoe UI", 9.5F, FontStyle.Italic) : new Font("Segoe UI Semibold", 9.5F);
         label.AccessibleName = "Edit note label";
         label.Click += (_, _) => board.EditLabel(note, FindForm() ?? board);
         headerButtons.Add(label);
-        header.Controls.Add(label);
+        commands.Controls.Add(label);
 
         grip = new Label
         {
@@ -92,17 +99,23 @@ internal sealed class NoteCard : UserControl
             grip.MouseCaptureChanged += (_, _) => FinishDrag();
             grip.MouseUp += (_, _) => FinishDrag();
         }
-        header.Controls.Add(grip);
+        commands.Controls.Add(grip);
 
         Button options = HeaderButton("⋯", "Note options", DockStyle.Right);
         options.Click += (_, _) => menu.Show(options, new Point(0, options.Height));
-        header.Controls.Add(options);
+        commands.Controls.Add(options);
         if (!floating)
         {
             Button pop = HeaderButton("↗", "Pop out note", DockStyle.Right);
             pop.Click += (_, _) => board.PopOut(note);
-            header.Controls.Add(pop);
-            pin = HeaderButton("", "Pin note", DockStyle.Left);
+            commands.Controls.Add(pop);
+            pin = HeaderButton("", "Pin note", isImage ? DockStyle.None : DockStyle.Left);
+            if (isImage)
+            {
+                pin.Height = 24;
+                pin.Left = (header.ClientSize.Width - pin.Width) / 2;
+                header.Resize += (_, _) => pin.Left = (header.ClientSize.Width - pin.Width) / 2;
+            }
             pin.Paint += (_, e) => BoardStyle.DrawPin(e.Graphics, new Point(pin.Width / 2, pin.Height / 2), note.Pinned, note.PinColor, connectionTarget);
             pin.Click += (_, _) =>
             {
@@ -151,7 +164,7 @@ internal sealed class NoteCard : UserControl
             toolbar.Controls.Add(color);
         }
 
-        var colorOptions = new ToolStripMenuItem("Note color");
+        var colorOptions = new ToolStripMenuItem(isImage ? "Frame color" : "Note color");
         for (int i = 0; i < BoardStyle.Colors.Length; i++)
         {
             int chosen = i;
@@ -169,9 +182,10 @@ internal sealed class NoteCard : UserControl
         menu.Opening += (_, _) => { above.Checked = note.PoppedOut && note.AlwaysOnTop; CheckColors(colorOptions.DropDownItems); };
 
         paper.Controls.Add(writingArea);
+        if (photoCaption is not null) paper.Controls.Add(photoCaption);
         if (!floating)
         {
-            resizeFooter = new Panel { Dock = DockStyle.Bottom, Height = 23 };
+            resizeFooter = new Panel { Dock = DockStyle.Bottom, Height = isImage ? 17 : 23 };
             resizeGrip = BoardStyle.Button("", BoardStyle.PanelTint, BoardStyle.Ink);
             resizeGrip.Dock = DockStyle.Right;
             resizeGrip.Width = 29;
@@ -187,7 +201,7 @@ internal sealed class NoteCard : UserControl
             resizeGrip.KeyDown += ResizeWithKeyboard;
             resizeFooter.Controls.Add(resizeGrip);
             paper.Controls.Add(resizeFooter);
-            SizeChanged += (_, _) => BoardStyle.RoundCorners(this, LogicalToDeviceUnits(7));
+            SizeChanged += (_, _) => BoardStyle.RoundCorners(this, LogicalToDeviceUnits(isImage ? 2 : 7));
         }
         if (toolbar is not null) paper.Controls.Add(toolbar);
         paper.Controls.Add(header);
@@ -198,7 +212,8 @@ internal sealed class NoteCard : UserControl
         ReadText();
     }
 
-    public Point PinPointOnParent => new(Left + Padding.Left + (pin?.Width ?? 28) / 2, Top + Padding.Top + header.Height / 2);
+    public Point PinPointOnParent => new(Left + Padding.Left + header.Left + (pin?.Left ?? 0) + (pin?.Width ?? 28) / 2,
+        Top + Padding.Top + header.Top + (pin?.Top ?? 0) + (pin?.Height ?? header.Height) / 2);
     public StickyNote Note => note;
 
     public void SetConnectionTarget(bool value)
@@ -255,14 +270,27 @@ internal sealed class NoteCard : UserControl
     public void ApplyColor()
     {
         var color = BoardStyle.Colors[Math.Clamp(note.Color, 0, BoardStyle.Colors.Length - 1)];
-        if (editor is not null) editor.BackColor = color.Paper;
-        writingArea.BackColor = color.Paper;
-        header.BackColor = color.Edge;
-        if (toolbar is not null) toolbar.BackColor = color.Paper;
-        if (resizeFooter is not null) resizeFooter.BackColor = color.Paper;
-        if (resizeGrip is not null) resizeGrip.BackColor = color.Paper;
-        foreach (Button button in headerButtons) button.BackColor = button.Parent == toolbar ? color.Paper : color.Edge;
+        Color paper = photoCaption is null ? color.Paper : BoardStyle.PhotoPaper(note.Color);
+        Color controls = photoCaption is null ? color.Edge : paper;
+        if (editor is not null) editor.BackColor = paper;
+        writingArea.BackColor = paper;
+        header.BackColor = controls;
+        if (photoCaption is not null) photoCaption.BackColor = paper;
+        if (toolbar is not null) toolbar.BackColor = paper;
+        if (resizeFooter is not null) resizeFooter.BackColor = paper;
+        if (resizeGrip is not null) resizeGrip.BackColor = paper;
+        foreach (Button button in headerButtons) button.BackColor = button.Parent == toolbar ? paper : controls;
         RefreshFormattingButtons();
+    }
+
+    private static void DrawPhotoEdge(object? sender, PaintEventArgs e)
+    {
+        if (sender is not PictureBox { Image: Image image } print || print.Width < 2 || print.Height < 2) return;
+        double scale = Math.Min((double)print.Width / image.Width, (double)print.Height / image.Height);
+        int width = Math.Max(1, (int)(image.Width * scale));
+        int height = Math.Max(1, (int)(image.Height * scale));
+        using var pen = new Pen(Color.FromArgb(95, BoardStyle.Muted));
+        e.Graphics.DrawRectangle(pen, (print.Width - width) / 2, (print.Height - height) / 2, width - 1, height - 1);
     }
 
     protected override bool ProcessCmdKey(ref Message message, Keys keys)

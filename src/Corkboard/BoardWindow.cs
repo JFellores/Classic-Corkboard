@@ -266,7 +266,10 @@ internal sealed class BoardWindow : ResizableWindow
         }
         string title = Path.GetFileNameWithoutExtension(path).Trim();
         if (title.Length > 45) title = title[..45];
-        AddNewCard(new StickyNote { ImageFile = file, Label = title, CardWidth = 288, CardHeight = 230 });
+        var note = new StickyNote { ImageFile = file, Label = title, Color = BoardStyle.Linen, CardWidth = 264 };
+        Image? photo = ReadImage(note);
+        note.CardHeight = photo is null ? 278 : Math.Clamp(80 + (int)Math.Round(239.0 * photo.Height / photo.Width), 205, 368);
+        AddNewCard(note);
         app.Save();
     }
 
@@ -277,7 +280,7 @@ internal sealed class BoardWindow : ResizableWindow
         Size size = LimitCardResize(CardArea.Location, PreferredCardSize(note));
         Point position = click is Point point ? new Point(point.X - Pixels(14), point.Y - Pixels(15)) : NextOpenPosition(size);
         Point fitted = LimitCardMove(position, size);
-        note.Color = board.Notes.Count % BoardStyle.Colors.Length;
+        if (note.ImageFile is null) note.Color = board.Notes.Count % BoardStyle.Colors.Length;
         board.Notes.Add(note);
         MoveNote(note, fitted.X, fitted.Y);
         AddCard(note);
