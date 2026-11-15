@@ -1,3 +1,4 @@
+using System.Drawing.Drawing2D;
 using System.Runtime.InteropServices;
 
 namespace Corkboard;
@@ -5,16 +6,20 @@ namespace Corkboard;
 internal sealed class NoteCard : UserControl
 {
     public static readonly Size InitialCardSize = new(248, 184);
-    public static readonly Size Smallest = new(224, 144);
     public static readonly Size Largest = new(1400, 1100);
+    private static readonly Size MinimumTextSize = new(224, 144);
+    private static readonly Size MinimumImageSize = new(110, 112);
     private readonly BoardWindow board;
     private readonly StickyNote note;
     private readonly RichTextBox? editor;
     private readonly Button label;
+    private readonly Button options;
     private readonly Button? pin;
+    private readonly Button? photoPop;
     private readonly Label grip;
     private readonly Panel header;
     private readonly Panel? photoCaption;
+    private readonly PictureBox? photoPrint;
     private readonly Panel? toolbar;
     private readonly Panel writingArea;
     private readonly Panel? resizeFooter;
@@ -31,6 +36,9 @@ internal sealed class NoteCard : UserControl
     private Size resizeOrigin;
     private bool refreshing;
     private bool connectionTarget;
+    private bool stamp;
+
+    public static Size MinimumSizeFor(StickyNote note) => note.ImageFile is null ? MinimumTextSize : MinimumImageSize;
 
     public NoteCard(BoardWindow board, StickyNote note, bool floating, Action? moveWindow = null, Image? image = null)
     {
@@ -50,9 +58,9 @@ internal sealed class NoteCard : UserControl
             writingArea.Padding = new Padding(11, 0, 11, 0);
             if (image is not null)
             {
-                var print = new PictureBox { Image = image, SizeMode = PictureBoxSizeMode.Zoom, Dock = DockStyle.Fill, AccessibleName = "Attached image" };
-                print.Paint += DrawPhotoEdge;
-                writingArea.Controls.Add(print);
+                photoPrint = new PictureBox { Image = image, SizeMode = PictureBoxSizeMode.Zoom, Dock = DockStyle.Fill, AccessibleName = "Attached image" };
+                photoPrint.Paint += DrawPhotoEdge;
+                writingArea.Controls.Add(photoPrint);
             }
             else writingArea.Controls.Add(new Label { Text = "Image unavailable", ForeColor = BoardStyle.Muted, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter });
         }
@@ -101,12 +109,13 @@ internal sealed class NoteCard : UserControl
         }
         commands.Controls.Add(grip);
 
-        Button options = HeaderButton("⋯", "Note options", DockStyle.Right);
+        options = HeaderButton("⋯", "Note options", DockStyle.Right);
         options.Click += (_, _) => menu.Show(options, new Point(0, options.Height));
         commands.Controls.Add(options);
         if (!floating)
         {
             Button pop = HeaderButton("↗", "Pop out note", DockStyle.Right);
+            if (isImage) photoPop = pop;
             pop.Click += (_, _) => board.PopOut(note);
             commands.Controls.Add(pop);
             pin = HeaderButton("", "Pin note", isImage ? DockStyle.None : DockStyle.Left);
@@ -201,7 +210,7 @@ internal sealed class NoteCard : UserControl
             resizeGrip.KeyDown += ResizeWithKeyboard;
             resizeFooter.Controls.Add(resizeGrip);
             paper.Controls.Add(resizeFooter);
-            SizeChanged += (_, _) => BoardStyle.RoundCorners(this, LogicalToDeviceUnits(isImage ? 2 : 7));
+            SizeChanged += (_, _) => UpdateCardFrame();
         }
         if (toolbar is not null) paper.Controls.Add(toolbar);
         paper.Controls.Add(header);
@@ -226,7 +235,8 @@ internal sealed class NoteCard : UserControl
     public void FocusEditor()
     {
         if (editor is not null) editor.Focus();
-        else label.Focus();
+        else if (label.Visible) label.Focus();
+        else options.Focus();
     }
 
     public void RefreshLabel()
@@ -283,14 +293,69 @@ internal sealed class NoteCard : UserControl
         RefreshFormattingButtons();
     }
 
-    private static void DrawPhotoEdge(object? sender, PaintEventArgs e)
+    private void DrawPhotoEdge(object? sender, PaintEventArgs e)
     {
         if (sender is not PictureBox { Image: Image image } print || print.Width < 2 || print.Height < 2) return;
         double scale = Math.Min((double)print.Width / image.Width, (double)print.Height / image.Height);
         int width = Math.Max(1, (int)(image.Width * scale));
         int height = Math.Max(1, (int)(image.Height * scale));
-        using var pen = new Pen(Color.FromArgb(95, BoardStyle.Muted));
-        e.Graphics.DrawRectangle(pen, (print.Width - width) / 2, (print.Height - height) / 2, width - 1, height - 1);
+        using var pen = new Pen(stamp ? Color.FromArgb(205, BoardStyle.Brick) : Color.FromArgb(95, BoardStyle.Muted));
+        var border = new Rectangle((print.Width - width) / 2, (print.Height - height) / 2, width - 1, height - 1);
+        e.Graphics.DrawRectangle(pen, border);
+        if (stamp && width > 12 && height > 12)
+        {
+            pen.Color = Color.FromArgb(120, BoardStyle.Brick);
+            e.Graphics.DrawRectangle(pen, Rectangle.Inflate(border, -2, -2));
+        }
+    }
+
+    private void UpdateCardFrame()
+    {
+        if (photoCaption is null || resizeFooter is null)
+        {
+            BoardStyle.RoundCorners(this, LogicalToDeviceUnits(7));
+            return;
+        }
+
+        bool compact = Width < LogicalToDeviceUnits(238) || Height < LogicalToDeviceUnits(184);
+        if (stamp != compact)
+        {
+            stamp = compact;
+            label.Visible = !stamp;
+            if (photoPop is not null) photoPop.Visible = !stamp;
+            header.Height = LogicalToDeviceUnits(stamp ? 21 : 25);
+            if (pin is not null) pin.Height = LogicalToDeviceUnits(stamp ? 21 : 24);
+            photoCaption.Height = LogicalToDeviceUnits(stamp ? 23 : 36);
+            resizeFooter.Height = LogicalToDeviceUnits(stamp ? 15 : 17);
+            int inset = LogicalToDeviceUnits(stamp ? 9 : 11);
+            writingArea.Padding = new Padding(inset, 0, inset, 0);
+            photoPrint?.Invalidate();
+        }
+
+        if (!stamp)
+        {
+            BoardStyle.RoundCorners(this, LogicalToDeviceUnits(2));
+            return;
+        }
+
+        int radius = LogicalToDeviceUnits(3);
+        int pitch = LogicalToDeviceUnits(10);
+        using var holes = new GraphicsPath(FillMode.Winding);
+        for (int x = pitch; x < Width - radius; x += pitch)
+        {
+            holes.AddEllipse(x - radius, -radius, radius * 2, radius * 2);
+            holes.AddEllipse(x - radius, Height - radius, radius * 2, radius * 2);
+        }
+        for (int y = pitch; y < Height - radius; y += pitch)
+        {
+            holes.AddEllipse(-radius, y - radius, radius * 2, radius * 2);
+            holes.AddEllipse(Width - radius, y - radius, radius * 2, radius * 2);
+        }
+        var edge = new Region(ClientRectangle);
+        edge.Exclude(holes);
+        Region? previous = Region;
+        Region = edge;
+        previous?.Dispose();
     }
 
     protected override bool ProcessCmdKey(ref Message message, Keys keys)
@@ -408,8 +473,9 @@ internal sealed class NoteCard : UserControl
         e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
         int right = grip.Width - 7;
         int bottom = grip.Height - 5;
-        e.Graphics.DrawLine(pen, right - 11, bottom, right, bottom - 11);
-        e.Graphics.DrawLine(pen, right - 6, bottom, right, bottom - 6);
+        int length = Math.Max(2, Math.Min(bottom, 11));
+        e.Graphics.DrawLine(pen, right - length, bottom, right, bottom - length);
+        e.Graphics.DrawLine(pen, right - Math.Min(6, length), bottom, right, bottom - Math.Min(6, length));
     }
 
     private void StartResize(object? sender, MouseEventArgs e)
@@ -451,7 +517,7 @@ internal sealed class NoteCard : UserControl
 
     private void SetCardSize(int width, int height)
     {
-        Size size = board.LimitCardResize(Location, new Size(width, height));
+        Size size = board.LimitCardResize(note, Location, new Size(width, height));
         SetCardBounds(new Rectangle(Location, size));
     }
 

@@ -277,7 +277,7 @@ internal sealed class BoardWindow : ResizableWindow
     {
         actions.Visible = false;
         ClearSelectionMode();
-        Size size = LimitCardResize(CardArea.Location, PreferredCardSize(note));
+        Size size = LimitCardResize(note, CardArea.Location, PreferredCardSize(note));
         Point position = click is Point point ? new Point(point.X - Pixels(14), point.Y - Pixels(15)) : NextOpenPosition(size);
         Point fitted = LimitCardMove(position, size);
         if (note.ImageFile is null) note.Color = board.Notes.Count % BoardStyle.Colors.Length;
@@ -319,13 +319,14 @@ internal sealed class BoardWindow : ResizableWindow
             Math.Clamp(wanted.Y, area.Top, Math.Max(area.Top, area.Bottom - size.Height)));
     }
 
-    public Size LimitCardResize(Point anchor, Size wanted)
+    public Size LimitCardResize(StickyNote note, Point anchor, Size wanted)
     {
         Rectangle area = CardArea;
         int width = Math.Max(1, Math.Min(Pixels(NoteCard.Largest.Width), area.Right - anchor.X));
         int height = Math.Max(1, Math.Min(Pixels(NoteCard.Largest.Height), area.Bottom - anchor.Y));
-        return new Size(Math.Clamp(wanted.Width, Math.Min(Pixels(NoteCard.Smallest.Width), width), width),
-            Math.Clamp(wanted.Height, Math.Min(Pixels(NoteCard.Smallest.Height), height), height));
+        Size minimum = NoteCard.MinimumSizeFor(note);
+        return new Size(Math.Clamp(wanted.Width, Math.Min(Pixels(minimum.Width), width), width),
+            Math.Clamp(wanted.Height, Math.Min(Pixels(minimum.Height), height), height));
     }
 
     public void ChangeText(StickyNote note, string text, string rtf, NoteCard sender)
@@ -782,14 +783,17 @@ internal sealed class BoardWindow : ResizableWindow
     private Rectangle CardArea => new(Pixels(12), Pixels(12), Math.Max(1, canvas.ClientSize.Width - Pixels(24)),
         Math.Max(1, canvas.ClientSize.Height - Pixels(72)));
 
-    private Size PreferredCardSize(StickyNote note) => new(
-        Pixels(ClampDimension(note.CardWidth, NoteCard.InitialCardSize.Width, NoteCard.Smallest.Width, NoteCard.Largest.Width)),
-        Pixels(ClampDimension(note.CardHeight, NoteCard.InitialCardSize.Height, NoteCard.Smallest.Height, NoteCard.Largest.Height)));
+    private Size PreferredCardSize(StickyNote note)
+    {
+        Size minimum = NoteCard.MinimumSizeFor(note);
+        return new Size(Pixels(ClampDimension(note.CardWidth, NoteCard.InitialCardSize.Width, minimum.Width, NoteCard.Largest.Width)),
+            Pixels(ClampDimension(note.CardHeight, NoteCard.InitialCardSize.Height, minimum.Height, NoteCard.Largest.Height)));
+    }
 
     private Rectangle PreferredCardBounds(StickyNote note)
     {
         var position = new Point(Pixels(Math.Clamp(note.X, 0, 16384)), Pixels(Math.Clamp(note.Y, 0, 16384)));
-        return FitPreferredCard(position, PreferredCardSize(note));
+        return FitPreferredCard(note, position, PreferredCardSize(note));
     }
 
     private Image? ReadImage(StickyNote note)
@@ -799,12 +803,13 @@ internal sealed class BoardWindow : ResizableWindow
         return image;
     }
 
-    private Rectangle FitPreferredCard(Point location, Size wanted)
+    private Rectangle FitPreferredCard(StickyNote note, Point location, Size wanted)
     {
         Rectangle area = CardArea;
-        var minimum = new Size(Math.Min(Pixels(NoteCard.Smallest.Width), area.Width), Math.Min(Pixels(NoteCard.Smallest.Height), area.Height));
+        Size requestedMinimum = NoteCard.MinimumSizeFor(note);
+        var minimum = new Size(Math.Min(Pixels(requestedMinimum.Width), area.Width), Math.Min(Pixels(requestedMinimum.Height), area.Height));
         Point anchor = LimitCardMove(location, minimum);
-        return new Rectangle(anchor, LimitCardResize(anchor, wanted));
+        return new Rectangle(anchor, LimitCardResize(note, anchor, wanted));
     }
 
     private void OpenFloating(StickyNote note, bool activate)

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.2 — Postage-stamp frames
+
+- Made smaller image cards look like perforated stamps and larger cards look like instant photos, with the same saved pin and thread connections.
+
 ## 0.5.1 — Instant-photo frames
 
 - Gave image cards cream paper borders, bottom captions, and centered pins.
