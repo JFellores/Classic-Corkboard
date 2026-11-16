@@ -24,6 +24,7 @@ internal sealed class BoardWindow : ResizableWindow
     private readonly System.Windows.Forms.Timer noticeTimer = new() { Interval = 5000 };
     private readonly ThreadPointerFilter threadInput;
     private Guid? connectFrom;
+    private Guid? movePinned;
     private Point? threadPointer;
     private NoteCard? threadTarget;
     private bool selectPin;
@@ -31,6 +32,7 @@ internal sealed class BoardWindow : ResizableWindow
     private bool hiding;
     private bool drawerOpening;
     private bool closing;
+    private bool menuHovered;
     private Rectangle? lastNormalBounds;
     private Rectangle? hiddenBounds;
     private bool hiddenMaximized;
@@ -83,15 +85,19 @@ internal sealed class BoardWindow : ResizableWindow
         };
         noticeTimer.Tick += (_, _) => { noticeTimer.Stop(); notice.Visible = false; };
 
-        fab = BoardStyle.Button("Board menu", BoardStyle.Paper, BoardStyle.Ink);
+        fab = BoardStyle.Button("", BoardStyle.Paper, BoardStyle.Ink);
         fab.Font = new Font("Segoe UI Semibold", 10F);
         fab.TextAlign = ContentAlignment.MiddleLeft;
-        fab.Padding = new Padding(40, 0, 9, 0);
+        fab.Padding = new Padding(36, 0, 9, 0);
         fab.FlatAppearance.BorderSize = 1;
         fab.FlatAppearance.BorderColor = BoardStyle.PanelTint;
         fab.AccessibleName = "Board actions";
         fab.Paint += PaintMenuGlyph;
         actions = BuildActions();
+        fab.MouseEnter += (_, _) => { menuHovered = true; RefreshMenuButton(); };
+        fab.MouseLeave += (_, _) => { menuHovered = false; RefreshMenuButton(); };
+        fab.GotFocus += (_, _) => RefreshMenuButton();
+        fab.LostFocus += (_, _) => RefreshMenuButton();
         actions.VisibleChanged += (_, _) => RefreshMenuButton();
         drawerClip.VisibleChanged += (_, _) => RefreshMenuButton();
         fab.Click += (_, _) =>
@@ -133,6 +139,12 @@ internal sealed class BoardWindow : ResizableWindow
     protected override void OnPaint(PaintEventArgs e)
     {
         base.OnPaint(e);
+        if (canvas is not null && canvas.Width > 0)
+        {
+            using var cork = new TextureBrush(BoardStyle.CorkTile);
+            cork.TranslateTransform(canvas.Left, canvas.Top);
+            e.Graphics.FillRectangle(cork, canvas.Left, Frame, canvas.Width, canvas.Top - Frame);
+        }
         BoardStyle.DrawFrame(e.Graphics, ClientSize.Width, ClientSize.Height, Frame);
     }
 
@@ -172,7 +184,7 @@ internal sealed class BoardWindow : ResizableWindow
     {
         if (keys == (Keys.Control | Keys.N)) { AddNote(); return true; }
         if (keys == (Keys.Control | Keys.Shift | Keys.B)) { actions.Visible = false; AnimateDrawer(!drawerClip.Visible); return true; }
-        if (keys == Keys.Escape && (selectPin || connectFrom.HasValue || actions.Visible || drawerClip.Visible))
+        if (keys == Keys.Escape && (selectPin || connectFrom.HasValue || movePinned.HasValue || actions.Visible || drawerClip.Visible))
         {
             ClearSelectionMode();
             actions.Visible = false;
@@ -290,15 +302,51 @@ internal sealed class BoardWindow : ResizableWindow
         app.MarkDirty();
     }
 
-    public void MoveNote(StickyNote note, int x, int y)
+    public bool CanMoveNote(StickyNote note) => !note.Pinned || movePinned == note.Id;
+    public bool CanDragPin => !selectPin && !IsConnecting;
+
+    public void TogglePinnedMove(StickyNote note)
     {
-        if (note.Pinned) return;
+        bool enable = movePinned != note.Id;
+        ClearSelectionMode();
+        if (!enable || !note.Pinned || !cards.TryGetValue(note.Id, out NoteCard? card)) return;
+        movePinned = note.Id;
+        card.RefreshPin();
+        ShowNotice("Drag the note by its handle · Esc to cancel", true);
+    }
+
+    public void FinishPinnedMove(StickyNote note)
+    {
+        if (movePinned == note.Id) ClearSelectionMode();
+    }
+
+    public void MoveNote(StickyNote note, int x, int y, bool byPin = false)
+    {
+        if (!byPin && !CanMoveNote(note)) return;
         int logicalX = (int)Math.Round(x * 96.0 / DeviceDpi);
         int logicalY = (int)Math.Round(y * 96.0 / DeviceDpi);
         if (note.X == logicalX && note.Y == logicalY) return;
         note.X = logicalX;
         note.Y = logicalY;
         app.MarkDirty();
+    }
+
+    public void RedrawCard(NoteCard card, Rectangle previous, Point previousPin)
+    {
+        if (card.Parent != canvas) return;
+        Rectangle dirty = Rectangle.Union(previous, card.Bounds);
+        if (previousPin != card.PinPointOnParent)
+        {
+            foreach (NoteThread thread in board.Threads)
+            {
+                Guid other = thread.From == card.Note.Id ? thread.To : thread.To == card.Note.Id ? thread.From : Guid.Empty;
+                if (cards.TryGetValue(other, out NoteCard? endpoint))
+                    dirty = Rectangle.Union(dirty, new Rectangle(endpoint.PinPointOnParent, new Size(1, 1)));
+            }
+        }
+        dirty.Inflate(Pixels(3), Pixels(3));
+        canvas.Invalidate(dirty);
+        canvas.Update();
     }
 
     public void SaveCardSize(StickyNote note, Size size)
@@ -361,10 +409,11 @@ internal sealed class BoardWindow : ResizableWindow
         note.Color = color;
         cards[note.Id].ApplyColor();
         if (floating.TryGetValue(note.Id, out FloatingNote? popup)) popup.ApplyColor(color);
+        if (board.Threads.Any(thread => thread.From == note.Id && thread.Color is null)) canvas.Invalidate();
         app.MarkDirty();
     }
 
-    public void ChangePinColor(StickyNote note, int color)
+    public void ChangePinColor(StickyNote note, int? color)
     {
         if (note.PinColor == color) return;
         note.PinColor = color;
@@ -379,6 +428,7 @@ internal sealed class BoardWindow : ResizableWindow
         cards[note.Id].RefreshPin();
         if (!pinned)
         {
+            FinishPinnedMove(note);
             board.Threads.RemoveAll(thread => thread.From == note.Id || thread.To == note.Id);
             canvas.Invalidate();
             if (connectFrom == note.Id) ClearSelectionMode();
@@ -434,9 +484,7 @@ internal sealed class BoardWindow : ResizableWindow
             Guid other = thread.From == note.Id ? thread.To : thread.From;
             StickyNote? destination = board.Notes.Find(candidate => candidate.Id == other);
             if (destination is null) continue;
-            string label = new NoteListItem(destination).Caption;
-            if (label.Length > 38) label = label[..37] + "…";
-            var item = new ToolStripMenuItem(label.Replace("&", "&&"));
+            var item = new ToolStripMenuItem(ThreadCaption(destination).Replace("&", "&&"));
             AddThreadColors(item.DropDownItems, thread);
             menu.DropDownItems.Add(item);
         }
@@ -683,17 +731,19 @@ internal sealed class BoardWindow : ResizableWindow
     private void LayoutBoard()
     {
         int inset = Frame;
-        canvas.Bounds = new Rectangle(inset, inset, Math.Max(0, ClientSize.Width - inset * 2), Math.Max(0, ClientSize.Height - inset * 2));
+        int shelfHeight = Pixels(48);
+        canvas.Bounds = new Rectangle(inset, inset + shelfHeight, Math.Max(0, ClientSize.Width - inset * 2),
+            Math.Max(0, ClientSize.Height - inset * 2 - shelfHeight));
         if (WindowState != FormWindowState.Minimized && canvas.ClientSize.Width > 0 && canvas.ClientSize.Height > 0)
             foreach (StickyNote note in board.Notes)
                 if (cards.TryGetValue(note.Id, out NoteCard? card)) card.Bounds = PreferredCardBounds(note);
         emptyState.Location = new Point(Math.Max(8, (canvas.ClientSize.Width - emptyState.Width) / 2), Math.Max(8, (canvas.ClientSize.Height - emptyState.Height) / 2));
-        fab.Bounds = new Rectangle(inset + Pixels(12), Math.Max(inset, ClientSize.Height - inset - Pixels(54)), Pixels(145), Pixels(42));
-        BoardStyle.RoundCorners(fab, Pixels(21));
-        actions.Bounds = new Rectangle(fab.Left, Math.Max(inset + Pixels(4), fab.Top - Pixels(312)), Pixels(202), Pixels(304));
+        fab.Location = new Point(inset + Pixels(12), inset + Pixels(5));
+        RefreshMenuButton();
+        actions.Bounds = new Rectangle(fab.Left, canvas.Top + Pixels(4), Pixels(202), Pixels(304));
         BoardStyle.RoundCorners(actions, Pixels(8));
-        drawerClip.Location = new Point(fab.Left, inset + Pixels(9));
-        drawerClip.Height = Math.Max(0, fab.Top - drawerClip.Top - Pixels(7));
+        drawerClip.Location = new Point(fab.Left, canvas.Top + Pixels(4));
+        drawerClip.Height = Math.Max(0, canvas.Bottom - drawerClip.Top - Pixels(9));
         drawer.Size = new Size(DrawerWidth, drawerClip.Height);
         BoardStyle.RoundCorners(drawer, Pixels(8));
         LayoutNotice();
@@ -702,7 +752,7 @@ internal sealed class BoardWindow : ResizableWindow
     private void LayoutNotice()
     {
         int right = canvas.Right - Pixels(12);
-        int room = Math.Max(1, right - fab.Right - Pixels(10));
+        int room = Math.Max(1, right - fab.Left - Pixels(155));
         int measured = TextRenderer.MeasureText(notice.Text, notice.Font).Width + Pixels(24);
         int width = Math.Min(room, measured);
         int height = Pixels(28);
@@ -712,14 +762,21 @@ internal sealed class BoardWindow : ResizableWindow
 
     private void RefreshMenuButton()
     {
-        fab.Text = actions.Visible || drawerClip.Visible ? "Close menu" : "Board menu";
+        bool expanded = menuHovered || fab.Focused;
+        Size size = new(Pixels(expanded ? 145 : 38), Pixels(38));
+        if (fab.Size != size)
+        {
+            fab.Size = size;
+            BoardStyle.RoundCorners(fab, Pixels(19));
+        }
+        fab.Text = expanded ? (actions.Visible || drawerClip.Visible ? "Close menu" : "Board menu") : "";
         fab.Invalidate();
     }
 
     private void PaintMenuGlyph(object? sender, PaintEventArgs e)
     {
         e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-        int centerX = Pixels(21);
+        int centerX = Pixels(19);
         int centerY = fab.Height / 2;
         int radius = Pixels(13);
         using var accent = new SolidBrush(BoardStyle.Brick);
@@ -781,7 +838,7 @@ internal sealed class BoardWindow : ResizableWindow
     }
 
     private Rectangle CardArea => new(Pixels(12), Pixels(12), Math.Max(1, canvas.ClientSize.Width - Pixels(24)),
-        Math.Max(1, canvas.ClientSize.Height - Pixels(72)));
+        Math.Max(1, canvas.ClientSize.Height - Pixels(24)));
 
     private Size PreferredCardSize(StickyNote note)
     {
@@ -842,12 +899,12 @@ internal sealed class BoardWindow : ResizableWindow
         foreach (NoteThread thread in board.Threads)
         {
             if (!TryEndpoints(thread, out Point start, out Point end)) continue;
-            pen.Color = BoardStyle.ThreadColors[Math.Clamp(thread.Color, 0, BoardStyle.ThreadColors.Length - 1)].Color;
+            pen.Color = ResolveThreadColor(thread);
             graphics.DrawLine(pen, start, end);
         }
         if (threadPointer is Point pointer && connectFrom is Guid source && cards.TryGetValue(source, out NoteCard? card))
         {
-            pen.Color = BoardStyle.ThreadColors[0].Color;
+            pen.Color = BoardStyle.NoteAccent(card.Note.Color);
             pen.DashStyle = DashStyle.Dash;
             graphics.DrawLine(pen, card.PinPointOnParent, pointer);
         }
@@ -858,8 +915,11 @@ internal sealed class BoardWindow : ResizableWindow
         actions.Visible = false;
         if (HitThread(e.Location) is not NoteThread thread || selectPin || connectFrom.HasValue) return;
         ClearMenu(threadMenu.Items);
-        var heading = new ToolStripLabel("Thread color");
-        threadMenu.Items.Add(heading);
+        threadMenu.SetSurface(ResolveThreadColor(thread));
+        string from = ThreadCaption(cards[thread.From].Note);
+        string to = ThreadCaption(cards[thread.To].Note);
+        threadMenu.Items.Add(new ToolStripLabel($"{from}  ↔  {to}"));
+        threadMenu.Items.Add(new ToolStripSeparator());
         AddThreadColors(threadMenu.Items, thread);
         threadMenu.Items.Add(new ToolStripSeparator());
         threadMenu.Items.Add("Remove thread", null, (_, _) => { board.Threads.Remove(thread); canvas.Invalidate(); app.MarkDirty(); });
@@ -868,14 +928,39 @@ internal sealed class BoardWindow : ResizableWindow
 
     private void AddThreadColors(ToolStripItemCollection items, NoteThread thread)
     {
+        var match = new ToolStripMenuItem("Match starting note") { Checked = thread.Color is null };
+        match.Click += (_, _) => SetThreadColor(thread, null);
+        items.Add(match);
         for (int i = 0; i < BoardStyle.ThreadColors.Length; i++)
         {
             int color = i;
             var item = new ToolStripMenuItem(BoardStyle.ThreadColors[i].Name) { Checked = thread.Color == i, ForeColor = BoardStyle.ThreadColors[i].Color };
             if (i == 4) item.ForeColor = BoardStyle.Ink;
-            item.Click += (_, _) => { thread.Color = color; canvas.Invalidate(); app.MarkDirty(); };
+            item.Click += (_, _) => SetThreadColor(thread, color);
             items.Add(item);
         }
+    }
+
+    private void SetThreadColor(NoteThread thread, int? color)
+    {
+        if (thread.Color == color) return;
+        thread.Color = color;
+        canvas.Invalidate();
+        app.MarkDirty();
+    }
+
+    private Color ResolveThreadColor(NoteThread thread)
+    {
+        if (thread.Color is int color)
+            return BoardStyle.ThreadColors[Math.Clamp(color, 0, BoardStyle.ThreadColors.Length - 1)].Color;
+        return cards.TryGetValue(thread.From, out NoteCard? from)
+            ? BoardStyle.NoteAccent(from.Note.Color) : BoardStyle.ThreadColors[0].Color;
+    }
+
+    private static string ThreadCaption(StickyNote note)
+    {
+        string caption = new NoteListItem(note).Caption;
+        return caption.Length > 38 ? caption[..37] + "…" : caption;
     }
 
     private static void ClearMenu(ToolStripItemCollection items)
@@ -908,7 +993,12 @@ internal sealed class BoardWindow : ResizableWindow
 
     private void ClearSelectionMode()
     {
-        if (selectPin || connectFrom.HasValue) notice.Visible = false;
+        if (selectPin || connectFrom.HasValue || movePinned.HasValue) notice.Visible = false;
+        if (movePinned is Guid moving)
+        {
+            movePinned = null;
+            if (cards.TryGetValue(moving, out NoteCard? card)) card.RefreshPin();
+        }
         selectPin = false;
         if (!connectFrom.HasValue) return;
         connectFrom = null;

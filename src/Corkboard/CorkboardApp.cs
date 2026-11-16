@@ -247,7 +247,7 @@ internal sealed class CorkboardApp : ApplicationContext
     {
         foreach (ToolStripItem item in trayMenu.Items.Cast<ToolStripItem>().ToArray()) item.Dispose();
         trayMenu.Items.Add("Open Corkboard", null, (_, _) => ReopenBoard());
-        var boards = new ToolStripMenuItem("Corkboards");
+        var boards = new TrayBoardsItem();
         foreach (CorkBoard board in data.Boards)
         {
             var item = new ToolStripMenuItem(board.Name, null, (_, _) => Open(board)) { Checked = openBoards.ContainsKey(board.Id) };
@@ -256,5 +256,30 @@ internal sealed class CorkboardApp : ApplicationContext
         trayMenu.Items.Add(boards);
         trayMenu.Items.Add(new ToolStripSeparator());
         trayMenu.Items.Add("Exit Corkboard", null, (_, _) => Exit());
+    }
+
+    private sealed class TrayBoardsItem() : ToolStripMenuItem("Corkboards")
+    {
+        protected override Point DropDownLocation
+        {
+            get
+            {
+                if (GetCurrentParent() is not ToolStrip parent) return base.DropDownLocation;
+
+                Rectangle menu = parent.RectangleToScreen(parent.ClientRectangle);
+                Rectangle workArea = Screen.FromRectangle(menu).WorkingArea;
+                Size size = DropDown.GetPreferredSize(Size.Empty);
+                int overlap = parent.LogicalToDeviceUnits(1);
+                int right = menu.Right - overlap;
+                int left = menu.Left + overlap;
+                int roomRight = workArea.Right - right;
+                int roomLeft = left - workArea.Left;
+                bool openRight = roomRight >= size.Width || roomRight >= roomLeft;
+                int x = openRight ? right : left - size.Width;
+                return new Point(
+                    Math.Clamp(x, workArea.Left, Math.Max(workArea.Left, workArea.Right - size.Width)),
+                    Math.Clamp(menu.Top + Bounds.Top, workArea.Top, Math.Max(workArea.Top, workArea.Bottom - size.Height)));
+            }
+        }
     }
 }

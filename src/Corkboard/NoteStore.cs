@@ -36,7 +36,8 @@ internal sealed class StickyNote
     public string Label { get; set; } = "";
     public string? ImageFile { get; set; }
     public bool Pinned { get; set; }
-    public int PinColor { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public int? PinColor { get; set; }
     public int Color { get; set; }
     public int X { get; set; }
     public int Y { get; set; }
@@ -51,7 +52,8 @@ internal sealed class NoteThread
 {
     public Guid From { get; init; }
     public Guid To { get; init; }
-    public int Color { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public int? Color { get; set; }
 }
 
 internal sealed class NoteStore(string folder)

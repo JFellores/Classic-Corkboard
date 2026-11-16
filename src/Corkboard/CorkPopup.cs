@@ -17,6 +17,18 @@ internal sealed class CorkMenu : ContextMenuStrip
         ShowCheckMargin = true;
     }
 
+    public void SetSurface(Color color)
+    {
+        if (BackColor == color) return;
+        BackColor = color;
+        Renderer = new CorkRenderer(color);
+    }
+
+    private static Color Blend(Color surface, Color accent, int percent) => Color.FromArgb(
+        (surface.R * (100 - percent) + accent.R * percent) / 100,
+        (surface.G * (100 - percent) + accent.G * percent) / 100,
+        (surface.B * (100 - percent) + accent.B * percent) / 100);
+
     protected override void OnItemAdded(ToolStripItemEventArgs e)
     {
         base.OnItemAdded(e);
@@ -46,9 +58,10 @@ internal sealed class CorkMenu : ContextMenuStrip
 
     private static void StyleSubmenu(object? sender, EventArgs e)
     {
-        if (sender is not ToolStripMenuItem command || command.DropDown is not ToolStripDropDownMenu submenu) return;
-        submenu.Renderer = MenuRenderer;
-        submenu.BackColor = BoardStyle.Paper;
+        if (sender is not ToolStripMenuItem { Owner: ToolStrip owner } command ||
+            command.DropDown is not ToolStripDropDownMenu submenu) return;
+        submenu.Renderer = owner.Renderer;
+        submenu.BackColor = owner.BackColor;
         submenu.ForeColor = BoardStyle.Ink;
         submenu.Padding = new Padding(6);
         submenu.ShowImageMargin = false;
@@ -65,13 +78,51 @@ internal sealed class CorkMenu : ContextMenuStrip
 
     private sealed class CorkRenderer : ToolStripProfessionalRenderer
     {
-        public CorkRenderer() : base(new CorkMenuColors()) { RoundedEdges = false; }
+        private readonly Color? surface;
+        private readonly Color ink;
+        private readonly Color selection;
+        private readonly Color borderColor;
+
+        public CorkRenderer(Color? surface = null) : base(new CorkMenuColors(surface))
+        {
+            this.surface = surface;
+            ink = surface is Color color ? SurfaceInk(color) : BoardStyle.Ink;
+            selection = surface is Color fill ? Blend(fill, ink, 14) : BoardStyle.PanelTint;
+            borderColor = surface is Color border ? Blend(border, ink, 28) : Color.FromArgb(208, 184, 153);
+            RoundedEdges = false;
+        }
+
+        protected override void OnRenderToolStripBackground(ToolStripRenderEventArgs e)
+        {
+            if (surface is not Color color) { base.OnRenderToolStripBackground(e); return; }
+            using var brush = new SolidBrush(color);
+            e.Graphics.FillRectangle(brush, e.AffectedBounds);
+        }
+
+        protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
+        {
+            if (surface.HasValue) e.TextColor = ink;
+            base.OnRenderItemText(e);
+        }
+
+        protected override void OnRenderItemCheck(ToolStripItemImageRenderEventArgs e)
+        {
+            Rectangle area = e.ImageRectangle;
+            float x = area.Left + area.Width / 2f;
+            float y = area.Top + area.Height / 2f;
+            float scale = (e.ToolStrip?.DeviceDpi ?? 96) / 96f;
+            using var pen = new Pen(ink, 1.5f * scale) { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round };
+            GraphicsState state = e.Graphics.Save();
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            e.Graphics.DrawLines(pen, [new PointF(x - 4 * scale, y), new PointF(x - scale, y + 3 * scale), new PointF(x + 4 * scale, y - 3 * scale)]);
+            e.Graphics.Restore(state);
+        }
 
         protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e)
         {
             if (!e.Item.Selected || !e.Item.Enabled || e.Item.Width < 10 || e.Item.Height < 8) return;
             using GraphicsPath shape = BoardStyle.RoundedOutline(new Rectangle(2, 1, e.Item.Width - 4, e.Item.Height - 2), 5);
-            using var fill = new SolidBrush(BoardStyle.PanelTint);
+            using var fill = new SolidBrush(selection);
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
             e.Graphics.FillPath(fill, shape);
         }
@@ -83,30 +134,35 @@ internal sealed class CorkMenu : ContextMenuStrip
             border.Width--;
             border.Height--;
             using GraphicsPath outline = BoardStyle.RoundedOutline(border, e.ToolStrip.LogicalToDeviceUnits(9));
-            using var pen = new Pen(Color.FromArgb(208, 184, 153));
+            using var pen = new Pen(borderColor);
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
             e.Graphics.DrawPath(pen, outline);
         }
 
         protected override void OnRenderArrow(ToolStripArrowRenderEventArgs e)
         {
-            e.ArrowColor = BoardStyle.Muted;
+            e.ArrowColor = surface.HasValue ? ink : BoardStyle.Muted;
             base.OnRenderArrow(e);
         }
     }
 
-    private sealed class CorkMenuColors : ProfessionalColorTable
+    private static Color SurfaceInk(Color surface) =>
+        (surface.R * 299 + surface.G * 587 + surface.B * 114) >= 140_000 ? BoardStyle.Ink : Color.White;
+
+    private sealed class CorkMenuColors(Color? surface) : ProfessionalColorTable
     {
-        public override Color ToolStripDropDownBackground => BoardStyle.Paper;
-        public override Color ImageMarginGradientBegin => BoardStyle.Paper;
-        public override Color ImageMarginGradientMiddle => BoardStyle.Paper;
-        public override Color ImageMarginGradientEnd => BoardStyle.Paper;
-        public override Color MenuBorder => BoardStyle.PanelTint;
-        public override Color SeparatorDark => BoardStyle.PanelTint;
-        public override Color SeparatorLight => BoardStyle.Paper;
-        public override Color CheckBackground => BoardStyle.PanelTint;
-        public override Color CheckSelectedBackground => BoardStyle.PanelTint;
-        public override Color CheckPressedBackground => BoardStyle.PanelTint;
+        private readonly Color paper = surface ?? BoardStyle.Paper;
+        private readonly Color detail = surface is Color color ? Blend(color, SurfaceInk(color), 20) : BoardStyle.PanelTint;
+        public override Color ToolStripDropDownBackground => paper;
+        public override Color ImageMarginGradientBegin => paper;
+        public override Color ImageMarginGradientMiddle => paper;
+        public override Color ImageMarginGradientEnd => paper;
+        public override Color MenuBorder => detail;
+        public override Color SeparatorDark => detail;
+        public override Color SeparatorLight => paper;
+        public override Color CheckBackground => detail;
+        public override Color CheckSelectedBackground => detail;
+        public override Color CheckPressedBackground => detail;
     }
 }
 

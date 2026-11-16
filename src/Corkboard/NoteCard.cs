@@ -30,8 +30,10 @@ internal sealed class NoteCard : UserControl
     private readonly CorkMenu pinMenu = new();
     private readonly CorkMenu? colorMenu;
     private readonly ToolTip tips = new();
-    private Point? dragStart;
+    private Control? dragHandle;
+    private Point dragStart;
     private Point dragOrigin;
+    private bool pinDragged;
     private Point? resizeStart;
     private Size resizeOrigin;
     private bool refreshing;
@@ -102,10 +104,7 @@ internal sealed class NoteCard : UserControl
         }
         else
         {
-            grip.MouseDown += StartDrag;
-            grip.MouseMove += MoveDrag;
-            grip.MouseCaptureChanged += (_, _) => FinishDrag();
-            grip.MouseUp += (_, _) => FinishDrag();
+            WireDragHandle(grip);
         }
         commands.Controls.Add(grip);
 
@@ -119,28 +118,39 @@ internal sealed class NoteCard : UserControl
             pop.Click += (_, _) => board.PopOut(note);
             commands.Controls.Add(pop);
             pin = HeaderButton("", "Pin note", isImage ? DockStyle.None : DockStyle.Left);
+            pin.Cursor = Cursors.Hand;
+            WireDragHandle(pin);
             if (isImage)
             {
                 pin.Height = 24;
                 pin.Left = (header.ClientSize.Width - pin.Width) / 2;
                 header.Resize += (_, _) => pin.Left = (header.ClientSize.Width - pin.Width) / 2;
             }
-            pin.Paint += (_, e) => BoardStyle.DrawPin(e.Graphics, new Point(pin.Width / 2, pin.Height / 2), note.Pinned, note.PinColor, connectionTarget);
-            pin.Click += (_, _) =>
+            pin.Paint += (_, e) => BoardStyle.DrawPin(e.Graphics, new Point(pin.Width / 2, pin.Height / 2), note.Pinned,
+                note.PinColor is int color ? BoardStyle.PinColors[Math.Clamp(color, 0, BoardStyle.PinColors.Length - 1)].Color
+                    : BoardStyle.NoteAccent(note.Color), connectionTarget);
+            pin.Click += (_, e) =>
             {
+                if (e is MouseEventArgs && pinDragged) return;
                 if (board.HandlePinSelection(note)) return;
                 if (!note.Pinned) board.SetPinned(note, true);
                 else pinMenu.Show(pin, new Point(0, pin.Height));
             };
             header.Controls.Add(pin);
+            var move = new ToolStripMenuItem("Move with pin", null, (_, _) => board.TogglePinnedMove(note));
+            pinMenu.Items.Add(move);
             pinMenu.Items.Add("Remove pin", null, (_, _) => board.SetPinned(note, false));
             pinMenu.Items.Add("Add thread", null, (_, _) => board.StartThread(note));
             var pinColors = new ToolStripMenuItem("Pin color");
+            var matchNote = new ToolStripMenuItem("Match note", null, (_, _) => board.ChangePinColor(note, null));
+            pinColors.DropDownItems.Add(matchNote);
+            var choices = new List<ToolStripMenuItem>();
             for (int i = 0; i < BoardStyle.PinColors.Length; i++)
             {
                 int index = i;
                 var choice = new ToolStripMenuItem(BoardStyle.PinColors[i].Name) { ForeColor = BoardStyle.PinColors[i].Color };
                 choice.Click += (_, _) => board.ChangePinColor(note, index);
+                choices.Add(choice);
                 pinColors.DropDownItems.Add(choice);
             }
             pinMenu.Items.Add(pinColors);
@@ -148,7 +158,10 @@ internal sealed class NoteCard : UserControl
             pinMenu.Items.Add(threadColors);
             pinMenu.Opening += (_, _) =>
             {
-                for (int i = 0; i < pinColors.DropDownItems.Count; i++) ((ToolStripMenuItem)pinColors.DropDownItems[i]).Checked = note.PinColor == i;
+                pinMenu.SetSurface(writingArea.BackColor);
+                move.Checked = board.CanMoveNote(note);
+                matchNote.Checked = note.PinColor is null;
+                for (int i = 0; i < choices.Count; i++) choices[i].Checked = note.PinColor == i;
                 board.ListThreadColors(note, threadColors);
             };
         }
@@ -180,7 +193,11 @@ internal sealed class NoteCard : UserControl
             colorMenu?.Items.Add(BoardStyle.Colors[i].Name, null, (_, _) => board.ChangeColor(note, chosen));
             colorOptions.DropDownItems.Add(BoardStyle.Colors[i].Name, null, (_, _) => board.ChangeColor(note, chosen));
         }
-        if (colorMenu is not null) colorMenu.Opening += (_, _) => CheckColors(colorMenu.Items);
+        if (colorMenu is not null) colorMenu.Opening += (_, _) =>
+        {
+            colorMenu.SetSurface(writingArea.BackColor);
+            CheckColors(colorMenu.Items);
+        };
         var above = new ToolStripMenuItem("Keep above other windows", null, (_, _) => board.ToggleAlwaysOnTop(note));
         menu.Items.Add(colorOptions);
         if (!floating) menu.Items.Add("Pop out note", null, (_, _) => board.PopOut(note));
@@ -188,7 +205,12 @@ internal sealed class NoteCard : UserControl
         menu.Items.Add("Edit label", null, (_, _) => board.EditLabel(note, FindForm() ?? board));
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Delete note", null, (_, _) => board.DeleteNote(note, FindForm() ?? board));
-        menu.Opening += (_, _) => { above.Checked = note.PoppedOut && note.AlwaysOnTop; CheckColors(colorOptions.DropDownItems); };
+        menu.Opening += (_, _) =>
+        {
+            menu.SetSurface(writingArea.BackColor);
+            above.Checked = note.PoppedOut && note.AlwaysOnTop;
+            CheckColors(colorOptions.DropDownItems);
+        };
 
         paper.Controls.Add(writingArea);
         if (photoCaption is not null) paper.Controls.Add(photoCaption);
@@ -249,9 +271,11 @@ internal sealed class NoteCard : UserControl
     {
         if (pin is null) return;
         pin.AccessibleName = note.Pinned ? "Pinned note options" : "Pin note";
-        tips.SetToolTip(pin, note.Pinned ? "Pinned note options" : "Pin note in place");
-        grip.Cursor = note.Pinned ? Cursors.Default : Cursors.SizeAll;
-        tips.SetToolTip(grip, note.Pinned ? "Unpin to move this note" : "Drag to move note");
+        pin.AccessibleDescription = "Hold and drag to move the card.";
+        tips.SetToolTip(pin, note.Pinned ? "Click for pin options · Hold and drag to move" : "Click to pin · Hold and drag to move");
+        bool canMove = board.CanMoveNote(note);
+        grip.Cursor = canMove ? Cursors.SizeAll : Cursors.Default;
+        tips.SetToolTip(grip, canMove ? "Drag to move note" : "Hold and drag the pin to move this note");
         pin.Invalidate();
     }
 
@@ -290,6 +314,7 @@ internal sealed class NoteCard : UserControl
         if (resizeFooter is not null) resizeFooter.BackColor = paper;
         if (resizeGrip is not null) resizeGrip.BackColor = paper;
         foreach (Button button in headerButtons) button.BackColor = button.Parent == toolbar ? paper : controls;
+        pin?.Invalidate();
         RefreshFormattingButtons();
     }
 
@@ -440,30 +465,65 @@ internal sealed class NoteCard : UserControl
         if (!refreshing && editor is not null) board.ChangeText(note, editor.Text, editor.Rtf ?? "", this);
     }
 
+    private void WireDragHandle(Control handle)
+    {
+        handle.MouseDown += StartDrag;
+        handle.MouseMove += MoveDrag;
+        handle.MouseUp += (_, e) => { if (e.Button == MouseButtons.Left) FinishDrag(handle); };
+        handle.MouseCaptureChanged += (_, _) => { if (!handle.Capture) FinishDrag(handle); };
+    }
+
     private void StartDrag(object? sender, MouseEventArgs e)
     {
-        if (e.Button != MouseButtons.Left || note.Pinned) return;
-        BringToFront();
-        dragStart = Cursor.Position;
+        if (e.Button != MouseButtons.Left || sender is not Control handle || dragHandle is not null) return;
+        if (handle == pin)
+        {
+            pinDragged = false;
+            if (!board.CanDragPin) return;
+        }
+        else
+        {
+            if (!board.CanMoveNote(note)) return;
+            BringToFront();
+        }
+        dragHandle = handle;
+        dragStart = handle.PointToScreen(e.Location);
         dragOrigin = Location;
-        grip.Capture = true;
+        handle.Capture = true;
     }
 
     private void MoveDrag(object? sender, MouseEventArgs e)
     {
-        if (dragStart is not Point start) return;
-        Point cursor = Cursor.Position;
-        var wanted = new Point(dragOrigin.X + cursor.X - start.X, dragOrigin.Y + cursor.Y - start.Y);
+        if (dragHandle is not Control handle || sender != handle) return;
+        Point cursor = handle.PointToScreen(e.Location);
+        if (handle == pin && !pinDragged)
+        {
+            Size threshold = SystemInformation.DragSize;
+            var clickArea = new Rectangle(dragStart.X - threshold.Width / 2, dragStart.Y - threshold.Height / 2,
+                threshold.Width, threshold.Height);
+            if (clickArea.Contains(cursor)) return;
+            pinDragged = true;
+            handle.Cursor = Cursors.SizeAll;
+            BringToFront();
+        }
+        var wanted = new Point(dragOrigin.X + cursor.X - dragStart.X, dragOrigin.Y + cursor.Y - dragStart.Y);
         Point next = board.LimitCardMove(wanted, Size);
         SetCardBounds(new Rectangle(next, Size));
     }
 
-    private void FinishDrag()
+    private void FinishDrag(Control handle)
     {
-        if (dragStart is null) return;
-        dragStart = null;
-        grip.Capture = false;
-        board.MoveNote(note, Left, Top);
+        if (dragHandle != handle) return;
+        dragHandle = null;
+        handle.Capture = false;
+        bool byPin = handle == pin;
+        if (byPin)
+        {
+            handle.Cursor = Cursors.Hand;
+            if (!pinDragged) return;
+        }
+        board.MoveNote(note, Left, Top, byPin);
+        board.FinishPinnedMove(note);
     }
 
     private static void DrawResizeGrip(object? sender, PaintEventArgs e)
@@ -525,11 +585,9 @@ internal sealed class NoteCard : UserControl
     {
         Rectangle previous = Bounds;
         if (previous == next) return;
+        Point previousPin = PinPointOnParent;
         Bounds = next;
-        if (Parent is not Panel canvas) return;
-        // Redraw the exposed cork and thread segments before the next drag frame.
-        canvas.Invalidate(Rectangle.Union(previous, Bounds));
-        canvas.Update();
+        board.RedrawCard(this, previous, previousPin);
     }
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]

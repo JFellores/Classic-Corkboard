@@ -48,6 +48,16 @@ internal static class BoardStyle
 
     public const int Linen = 5;
 
+    public static Color NoteAccent(int color) => color switch
+    {
+        0 => PinColors[1].Color,
+        1 => PinColors[0].Color,
+        2 => PinColors[2].Color,
+        3 => PinColors[3].Color,
+        4 => PinColors[4].Color,
+        _ => Color.FromArgb(123, 96, 59)
+    };
+
     public static Color PhotoPaper(int color)
     {
         Color tint = Colors[Math.Clamp(color, 0, Colors.Length - 1)].Paper;
@@ -118,10 +128,10 @@ internal static class BoardStyle
         return tile;
     }
 
-    public static void DrawPin(Graphics graphics, Point center, bool pinned = true, int color = 0, bool target = false)
+    public static void DrawPin(Graphics graphics, Point center, bool pinned = true, Color? color = null, bool target = false)
     {
         graphics.SmoothingMode = SmoothingMode.AntiAlias;
-        Color selected = PinColors[Math.Clamp(color, 0, PinColors.Length - 1)].Color;
+        Color selected = color ?? Brick;
         if (target)
         {
             using var indicator = new Pen(Ink, 1.5f);

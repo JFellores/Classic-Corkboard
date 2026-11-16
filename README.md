@@ -4,15 +4,15 @@
 
 Pin notes and photos to a classic corkboard on your Windows desktop. The app is small, works offline, and saves your board on your PC without an account. Pop out a sticky note when you want it in view, then tuck the board into the tray.
 
-## In v0.5.2
+## In v0.6.0
 
-**Postage-stamp frames.** Made smaller image cards look like perforated stamps and larger cards look like instant photos, with the same saved pin and thread connections.
+**Move pinned notes and identify thread connections.** Moved the compact Board menu above the notes and added hover and keyboard focus to reveal its label. Menu backgrounds match the note paper or the selected thread. Threads show the labels of connected cards. Hold and drag a card’s pin to move it with its threads attached. Fixed the detached Corkboards submenu in the Windows tray.
 
 ## Screenshots
 
-![An instant-photo card and a smaller postage-stamp image on one board](docs/images/release-0.5.2.jpg)
+![A thread menu that identifies the labels of both connected cards](docs/images/release-0.6.0.jpg)
 
-Two sizes of image card on the same board. (v0.5.2)
+The thread menu showing the two connected cards. (v0.6.0)
 
 ![A pinned instant-photo card connected to a sticky note with a red thread](docs/images/instant-photo.jpg)
 
@@ -54,6 +54,8 @@ Open `artifacts\win-x64\Corkboard.exe` on an x64 Windows PC with the .NET 8 Desk
 
 - **Connect two cards.** Click the first card’s pin to pin it, open its pin menu, and choose **Add thread**. A preview follows the pointer. Click the destination card to connect it, or press **Esc** to cancel.
 - **Change colors or remove a thread.** Open the pin menu for **Pin color**. Click a thread to select its color or remove it.
+- **Move a pinned card.** Hold and drag its pin to move the card with its threads attached. A quick click opens pin options. Use **Move with pin** if you prefer dragging the card by its handle.
+- **Identify a connection.** Click a thread to see both card labels. Choose **Match starting note** to keep the thread color in sync with the source card.
 
 ![Pin menu open on a photo card, showing Add thread and color options](docs/images/pin-menu.jpg)
 

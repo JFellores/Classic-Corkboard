@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.0 — Move pinned notes and identify thread connections
+
+- Moved the compact Board menu above the notes and added hover and keyboard focus to reveal its label. Menu backgrounds match the note paper or the selected thread. Threads show the labels of connected cards. Hold and drag a card’s pin to move it with its threads attached. Fixed the detached Corkboards submenu in the Windows tray.
+
 ## 0.5.2 — Postage-stamp frames
 
 - Made smaller image cards look like perforated stamps and larger cards look like instant photos, with the same saved pin and thread connections.
