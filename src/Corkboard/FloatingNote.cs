@@ -13,7 +13,8 @@ internal sealed class FloatingNote : ResizableWindow
         this.activate = activate;
         photo = note.ImageFile is not null;
         Icon = icon;
-        Text = string.IsNullOrWhiteSpace(note.Label) ? "Sticky note" : note.Label;
+        bool table = note.Table is not null;
+        Text = string.IsNullOrWhiteSpace(note.Label) ? (table ? "Table" : "Sticky note") : note.Label;
         Font = board.Font;
         ShowInTaskbar = false;
         TopMost = note.AlwaysOnTop;
@@ -21,9 +22,9 @@ internal sealed class FloatingNote : ResizableWindow
         SetStyle(ControlStyles.ResizeRedraw, true);
         Padding = new Padding(8);
         StartPosition = FormStartPosition.Manual;
-        MinimumSize = new Size(205, 155);
-        int width = photo ? Math.Clamp(note.CardWidth + 12, 258, 400) : 278;
-        int height = photo ? Math.Clamp(note.CardHeight + 32, 238, 450) : 206;
+        MinimumSize = table ? NoteCard.MinimumSizeFor(note) + new Size(16, 57) : new Size(205, 155);
+        int width = table ? Math.Clamp(note.CardWidth + 16, MinimumSize.Width, 560) : photo ? Math.Clamp(note.CardWidth + 12, 258, 400) : 278;
+        int height = table ? Math.Clamp(note.CardHeight + 57, MinimumSize.Height, 480) : photo ? Math.Clamp(note.CardHeight + 32, 238, 450) : 206;
         Bounds = FitOnScreen(note.PopupBounds ?? new Rectangle(board.Right - width - 17, board.Top + 66, width, height), MinimumSize, Screen.FromControl(board));
         Card = new NoteCard(board, note, floating: true, BeginWindowDrag, image) { Dock = DockStyle.Fill, Padding = Padding.Empty };
         Controls.Add(Card);
@@ -52,6 +53,12 @@ internal sealed class FloatingNote : ResizableWindow
     }
 
     protected override bool ShowWithoutActivation => !activate;
+
+    protected override void OnFormClosing(FormClosingEventArgs e)
+    {
+        Card.CommitTableEdit();
+        base.OnFormClosing(e);
+    }
 
     public void ApplyColor(int index)
     {

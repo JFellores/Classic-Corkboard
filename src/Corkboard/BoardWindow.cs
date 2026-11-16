@@ -1,26 +1,42 @@
+using System.Diagnostics;
 using System.Drawing.Drawing2D;
 
 namespace Corkboard;
 
 internal sealed class BoardWindow : ResizableWindow
 {
+    private static readonly Color NavigationPaper = Color.FromArgb(250, 236, 214);
+    private static readonly Color ActiveSlidePaper = Color.FromArgb(231, 204, 168);
     private readonly CorkboardApp app;
     private readonly CorkBoard board;
+    private readonly Panel corkViewport;
     private readonly BoardSurface canvas;
+    private readonly Dictionary<Guid, StickyNote> notes;
     private readonly Dictionary<Guid, NoteCard> cards = [];
     private readonly Dictionary<Guid, Image?> images = [];
     private readonly Dictionary<Guid, FloatingNote> floating = [];
     private readonly Button fab;
     private readonly Panel actions;
+    private readonly Panel slideControls;
+    private readonly Button previousSlide;
+    private readonly Button slideCounter;
+    private readonly Button nextSlide;
+    private readonly Button addSlide;
+    private readonly CorkMenu slideMenu = new();
     private readonly Panel drawerClip = new() { Visible = false };
     private readonly Panel drawer = new() { BackColor = BoardStyle.Paper };
     private readonly ListBox boardList = new() { IntegralHeight = false, AccessibleName = "Corkboards" };
     private readonly ListBox savedNotes = new() { IntegralHeight = false, AccessibleName = "Saved notes" };
     private readonly Label notice;
+    private readonly Label shortcutHint;
     private readonly Panel emptyState;
+    private readonly CorkMenu canvasMenu = new() { ShowCheckMargin = false };
     private readonly CorkMenu threadMenu = new();
     private readonly ToolTip tips = new();
     private readonly System.Windows.Forms.Timer drawerMotion = new() { Interval = 16 };
+    private readonly System.Windows.Forms.Timer slideMotion = new() { Interval = 16 };
+    private readonly System.Windows.Forms.Timer cardMotion = new() { Interval = 16 };
+    private readonly System.Windows.Forms.Timer threadMotion = new() { Interval = 16 };
     private readonly System.Windows.Forms.Timer noticeTimer = new() { Interval = 5000 };
     private readonly ThreadPointerFilter threadInput;
     private Guid? connectFrom;
@@ -33,18 +49,34 @@ internal sealed class BoardWindow : ResizableWindow
     private bool drawerOpening;
     private bool closing;
     private bool menuHovered;
+    private Point canvasMenuPosition;
+    private long slideStartedAt;
+    private int slideStartOffset;
+    private readonly List<NoteCard> appearingCards = [];
+    private long cardStartedAt;
+    private long threadStartedAt;
+    private double threadReveal = 1;
+    private bool revealThreadsAfterCards;
+    private Guid? focusAfterSlide;
     private Rectangle? lastNormalBounds;
     private Rectangle? hiddenBounds;
     private bool hiddenMaximized;
 
     protected override int FrameDragWidth => 24;
+    protected override int TopFrameDragWidth => 36;
     private int Frame => Pixels(FrameDragWidth);
+    private int TopFrame => Pixels(TopFrameDragWidth);
     private int DrawerWidth => Pixels(280);
+
+    protected override bool IsFrameCommand(Point point) =>
+        (fab?.Bounds.Contains(point) ?? false) || (slideControls?.Bounds.Contains(point) ?? false)
+        || (notice?.Visible == true && notice.Bounds.Contains(point));
 
     public BoardWindow(CorkboardApp app, CorkBoard board)
     {
         this.app = app;
         this.board = board;
+        notes = board.Notes.ToDictionary(note => note.Id);
         Text = board.Name;
         Icon = app.Icon;
         Font = new Font("Segoe UI", 10F);
@@ -62,9 +94,21 @@ internal sealed class BoardWindow : ResizableWindow
         }
         ResizeEnd += (_, _) => RememberBounds();
 
+        corkViewport = new Panel
+        {
+            AccessibleName = "Cork surface viewport", BackColor = BoardStyle.Cork,
+            BackgroundImage = BoardStyle.CorkTile, BackgroundImageLayout = ImageLayout.Tile
+        };
         canvas = new BoardSurface(DrawThreads);
+        corkViewport.Controls.Add(canvas);
+        slideMotion.Tick += (_, _) => AdvanceSlideTransition();
+        cardMotion.Tick += (_, _) => AdvanceCardEntrance();
+        threadMotion.Tick += (_, _) => AdvanceThreadReveal();
         threadInput = new ThreadPointerFilter(this);
         canvas.MouseClick += CanvasClick;
+        canvasMenu.Items.Add("Add note", null, (_, _) => AddNote(canvasMenuPosition));
+        canvasMenu.Items.Add("Add image…", null, (_, _) => ChooseImage(canvasMenuPosition));
+        canvasMenu.Items.Add("Add table", null, (_, _) => AddTable(canvasMenuPosition));
         canvas.MouseMove += (_, e) =>
         {
             Cursor desired = !selectPin && !connectFrom.HasValue && board.Threads.Count > 0 && HitThread(e.Location) is not null
@@ -73,7 +117,8 @@ internal sealed class BoardWindow : ResizableWindow
         };
         canvas.MouseDoubleClick += (_, e) =>
         {
-            if (e.Button == MouseButtons.Left && HitThread(e.Location) is null && !selectPin && connectFrom is null) AddNote(e.Location);
+            if (e.Button == MouseButtons.Left && !slideMotion.Enabled && HitThread(e.Location) is null && !selectPin && connectFrom is null)
+                AddNote(e.Location);
         };
         emptyState = BuildEmptyState();
         canvas.Controls.Add(emptyState);
@@ -84,16 +129,28 @@ internal sealed class BoardWindow : ResizableWindow
             AutoEllipsis = true, Padding = new Padding(8, 0, 8, 0)
         };
         noticeTimer.Tick += (_, _) => { noticeTimer.Stop(); notice.Visible = false; };
+        shortcutHint = new Label
+        {
+            Text = $"Minimize to tray: {CorkboardApp.BoardShortcut.Replace("+", " + ")}",
+            AccessibleName = "Minimize to tray and reopen shortcut",
+            Font = new Font("Segoe UI", 8.5F), TextAlign = ContentAlignment.MiddleLeft,
+            ForeColor = BoardStyle.Ink, BackColor = Color.Transparent, AutoEllipsis = true
+        };
 
-        fab = BoardStyle.Button("", BoardStyle.Paper, BoardStyle.Ink);
-        fab.Font = new Font("Segoe UI Semibold", 10F);
+        fab = BoardStyle.Button("", NavigationPaper, BoardStyle.Ink);
+        fab.Font = new Font("Segoe UI Semibold", 9F);
         fab.TextAlign = ContentAlignment.MiddleLeft;
-        fab.Padding = new Padding(36, 0, 9, 0);
-        fab.FlatAppearance.BorderSize = 1;
-        fab.FlatAppearance.BorderColor = BoardStyle.PanelTint;
+        fab.Padding = new Padding(26, 0, 4, 0);
         fab.AccessibleName = "Board actions";
         fab.Paint += PaintMenuGlyph;
         actions = BuildActions();
+        slideControls = new Panel { AccessibleName = "Corkboard slides", BackColor = NavigationPaper };
+        previousSlide = SlideButton("‹", "Previous slide", () => StepSlide(-1));
+        slideCounter = SlideButton("", "Manage slides", ShowSlideMenu);
+        slideCounter.BackColor = ActiveSlidePaper;
+        nextSlide = SlideButton("›", "Next slide", () => StepSlide(1));
+        addSlide = SlideButton("+", "Add slide", AddSlide);
+        slideControls.Controls.AddRange([previousSlide, slideCounter, nextSlide, addSlide]);
         fab.MouseEnter += (_, _) => { menuHovered = true; RefreshMenuButton(); };
         fab.MouseLeave += (_, _) => { menuHovered = false; RefreshMenuButton(); };
         fab.GotFocus += (_, _) => RefreshMenuButton();
@@ -109,7 +166,7 @@ internal sealed class BoardWindow : ResizableWindow
         BuildDrawer();
         drawerMotion.Tick += (_, _) => SlideDrawer();
 
-        Controls.AddRange([canvas, drawerClip, actions, fab, notice]);
+        Controls.AddRange([corkViewport, drawerClip, actions, fab, notice, slideControls, shortcutHint]);
         notice.BringToFront();
         fab.BringToFront();
         actions.BringToFront();
@@ -117,15 +174,24 @@ internal sealed class BoardWindow : ResizableWindow
         LayoutBoard();
     }
 
+    private Button SlideButton(string text, string description, Action action)
+    {
+        Button button = BoardStyle.Button(text, NavigationPaper, BoardStyle.Ink, compactText: true);
+        button.AccessibleName = description;
+        tips.SetToolTip(button, description);
+        button.Click += (_, _) => action();
+        return button;
+    }
+
     protected override void OnLoad(EventArgs e)
     {
         base.OnLoad(e);
         if (initialized) return;
+        // Apply saved screen coordinates after WinForms has created and scaled the window.
+        if (board.Bounds is Rectangle saved)
+            Bounds = FitOnScreen(saved, MinimumSize, Screen.FromControl(this));
         initialized = true;
-        canvas.SuspendLayout();
-        foreach (StickyNote note in board.Notes) AddCard(note);
-        canvas.ResumeLayout();
-        UpdateEmptyState();
+        LoadSlide();
     }
 
     protected override void OnShown(EventArgs e)
@@ -139,13 +205,7 @@ internal sealed class BoardWindow : ResizableWindow
     protected override void OnPaint(PaintEventArgs e)
     {
         base.OnPaint(e);
-        if (canvas is not null && canvas.Width > 0)
-        {
-            using var cork = new TextureBrush(BoardStyle.CorkTile);
-            cork.TranslateTransform(canvas.Left, canvas.Top);
-            e.Graphics.FillRectangle(cork, canvas.Left, Frame, canvas.Width, canvas.Top - Frame);
-        }
-        BoardStyle.DrawFrame(e.Graphics, ClientSize.Width, ClientSize.Height, Frame);
+        BoardStyle.DrawFrame(e.Graphics, ClientSize.Width, ClientSize.Height, Frame, TopFrame);
     }
 
     protected override void OnResize(EventArgs e)
@@ -163,10 +223,22 @@ internal sealed class BoardWindow : ResizableWindow
         TrackNormalBounds();
     }
 
+    protected override void OnVisibleChanged(EventArgs e)
+    {
+        base.OnVisibleChanged(e);
+        if (!Visible && !closing && !Disposing && canvas is not null)
+        {
+            FinishSlideTransition(animate: false);
+            FinishCardEntrance();
+            FinishThreadReveal();
+        }
+    }
+
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
         base.OnFormClosing(e);
         if (e.Cancel) return;
+        CommitTableEdits();
         ClearSelectionMode();
         RememberBounds();
         app.Save();
@@ -183,6 +255,8 @@ internal sealed class BoardWindow : ResizableWindow
     protected override bool ProcessCmdKey(ref Message msg, Keys keys)
     {
         if (keys == (Keys.Control | Keys.N)) { AddNote(); return true; }
+        if (keys == (Keys.Control | Keys.PageUp)) { StepSlide(-1); return true; }
+        if (keys == (Keys.Control | Keys.PageDown)) { StepSlide(1); return true; }
         if (keys == (Keys.Control | Keys.Shift | Keys.B)) { actions.Visible = false; AnimateDrawer(!drawerClip.Visible); return true; }
         if (keys == Keys.Escape && (selectPin || connectFrom.HasValue || movePinned.HasValue || actions.Visible || drawerClip.Visible))
         {
@@ -204,8 +278,15 @@ internal sealed class BoardWindow : ResizableWindow
             foreach (FloatingNote popup in floating.Values.ToArray()) popup.Dispose();
             noticeTimer.Dispose();
             drawerMotion.Dispose();
+            StopSlideMotion();
+            slideMotion.Dispose();
+            FinishCardEntrance();
+            cardMotion.Dispose();
+            threadMotion.Dispose();
             tips.Dispose();
+            canvasMenu.Dispose();
             threadMenu.Dispose();
+            slideMenu.Dispose();
         }
         base.Dispose(disposing);
         if (disposing)
@@ -222,8 +303,9 @@ internal sealed class BoardWindow : ResizableWindow
         if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
         if (hiddenBounds is Rectangle previous)
         {
-            hiddenBounds = null;
             Bounds = FitOnScreen(previous, MinimumSize, Screen.FromControl(this));
+            lastNormalBounds = Bounds;
+            hiddenBounds = null;
             if (hiddenMaximized)
             {
                 MaximizedBounds = Screen.FromControl(this).WorkingArea;
@@ -245,10 +327,287 @@ internal sealed class BoardWindow : ResizableWindow
 
     public void FocusNote(StickyNote note)
     {
-        if (!cards.TryGetValue(note.Id, out NoteCard? card)) return;
+        ShowSlide(note.SlideAddress);
         AnimateDrawer(false);
+        if (slideMotion.Enabled) focusAfterSlide = note.Id;
+        else FocusVisibleNote(note.Id);
+    }
+
+    private void FocusVisibleNote(Guid noteId)
+    {
+        if (!cards.TryGetValue(noteId, out NoteCard? card)) return;
         card.BringToFront();
         card.FocusEditor();
+    }
+
+    private void StepSlide(int delta) => ShowSlide(new BoardSlide(board.ActiveSlide + delta));
+
+    private void AddSlide()
+    {
+        if (board.HorizontalSlideCount == int.MaxValue) return;
+        board.HorizontalSlideCount++;
+        ShowSlide(new BoardSlide(board.HorizontalSlideCount - 1));
+    }
+
+    private void ShowSlide(BoardSlide slide)
+    {
+        if (!board.HasSlide(slide) || slide == board.CurrentSlide) return;
+        if (!IsConnecting) ClearSelectionMode();
+        threadTarget = null;
+        threadPointer = null;
+        focusAfterSlide = null;
+        actions.Visible = false;
+        StopSlideMotion();
+        int direction = Math.Sign(slide.Index - board.ActiveSlide);
+        board.CurrentSlide = slide;
+        if (Visible && canvas.Width > 0 && AnimationsEnabled)
+        {
+            ClearSlideCards();
+            emptyState.Visible = false;
+            RefreshSlideControls();
+            slideStartOffset = direction * Math.Min(canvas.Width / 5, Pixels(190));
+            slideStartedAt = Stopwatch.GetTimestamp();
+            canvas.Left = slideStartOffset;
+            slideMotion.Start();
+            canvas.Invalidate();
+        }
+        else LoadSlide();
+        app.MarkDirty();
+    }
+
+    private void AdvanceSlideTransition()
+    {
+        const double durationMs = 235;
+        double progress = Stopwatch.GetElapsedTime(slideStartedAt).TotalMilliseconds / durationMs;
+        if (progress >= 1)
+        {
+            FinishSlideTransition();
+            return;
+        }
+        double remaining = 1 - progress;
+        canvas.Left = (int)Math.Round(slideStartOffset * remaining * remaining * remaining);
+    }
+
+    private void AdvanceCardEntrance()
+    {
+        const double durationMs = 165;
+        double progress = Stopwatch.GetElapsedTime(cardStartedAt).TotalMilliseconds / durationMs;
+        if (progress >= 1)
+        {
+            bool startThreads = revealThreadsAfterCards;
+            FinishCardEntrance();
+            if (startThreads)
+            {
+                threadStartedAt = Stopwatch.GetTimestamp();
+                threadMotion.Start();
+            }
+            return;
+        }
+        double remaining = 1 - progress;
+        double reveal = 1 - remaining * remaining * remaining;
+        foreach (NoteCard card in appearingCards)
+            if (!card.IsDisposed) card.RevealEntrance(reveal);
+    }
+
+    private void BeginCardEntrance(IEnumerable<NoteCard> items)
+    {
+        foreach (NoteCard card in items)
+        {
+            card.BeginEntrance();
+            appearingCards.Add(card);
+        }
+        if (appearingCards.Count == 0) return;
+        cardStartedAt = Stopwatch.GetTimestamp();
+        cardMotion.Start();
+    }
+
+    private void FinishCardEntrance()
+    {
+        revealThreadsAfterCards = false;
+        cardMotion.Stop();
+        foreach (NoteCard card in appearingCards)
+            if (!card.IsDisposed) card.FinishEntrance();
+        appearingCards.Clear();
+    }
+
+    private void AdvanceThreadReveal()
+    {
+        const double durationMs = 245;
+        double progress = Stopwatch.GetElapsedTime(threadStartedAt).TotalMilliseconds / durationMs;
+        if (progress >= 1)
+        {
+            FinishThreadReveal();
+            return;
+        }
+        threadReveal = progress * progress * (3 - 2 * progress);
+        InvalidateThreadLines();
+    }
+
+    private void FinishThreadReveal()
+    {
+        revealThreadsAfterCards = false;
+        threadMotion.Stop();
+        if (threadReveal >= 1) return;
+        threadReveal = 1;
+        canvas.Invalidate();
+    }
+
+    private void InvalidateThreadLines()
+    {
+        foreach (NoteThread thread in board.Threads)
+            if (TryEndpoints(thread, out Point start, out Point end))
+                canvas.Invalidate(PreviewBounds(start, end));
+    }
+
+    private void StopSlideMotion()
+    {
+        slideMotion.Stop();
+        canvas.Left = 0;
+    }
+
+    private void FinishSlideTransition(bool animate = true)
+    {
+        if (slideMotion.Enabled) LoadSlide(animate);
+    }
+
+    private void ClearSlideCards()
+    {
+        FinishCardEntrance();
+        FinishThreadReveal();
+        canvas.SuspendLayout();
+        foreach (NoteCard card in cards.Values)
+        {
+            card.CommitTableEdit();
+            card.Dispose();
+            if (!floating.ContainsKey(card.Note.Id) && images.Remove(card.Note.Id, out Image? image)) image?.Dispose();
+        }
+        cards.Clear();
+        canvas.ResumeLayout();
+    }
+
+    private void LoadSlide(bool animate = false)
+    {
+        StopSlideMotion();
+        ClearSlideCards();
+        bool reveal = animate && AnimationsEnabled;
+        canvas.SuspendLayout();
+        foreach (StickyNote note in board.Notes.Where(note => note.SlideAddress == board.CurrentSlide))
+            AddCard(note, visible: !reveal);
+        if (reveal && cards.Count > 0)
+        {
+            revealThreadsAfterCards = board.Threads.Any(thread => TryEndpoints(thread, out _, out _));
+            if (revealThreadsAfterCards) threadReveal = 0;
+            BeginCardEntrance(cards.Values);
+            foreach (NoteCard card in cards.Values) card.Show();
+        }
+        canvas.ResumeLayout();
+        UpdateEmptyState();
+        RefreshSlideControls();
+        if (focusAfterSlide is Guid id)
+        {
+            focusAfterSlide = null;
+            FocusVisibleNote(id);
+        }
+        if (IsConnecting)
+        {
+            UpdateThreadPointer(canvas.PointToClient(Cursor.Position));
+            ShowNotice("Click a card · Esc to cancel", true);
+        }
+        canvas.Invalidate();
+    }
+
+    private void RefreshSlideControls()
+    {
+        int count = board.HorizontalSlideCount;
+        slideCounter.Text = $"{board.ActiveSlide + 1}/{count}";
+        slideCounter.AccessibleDescription = $"{board.CurrentSlide.Name} of {count}";
+        previousSlide.Enabled = board.ActiveSlide > 0;
+        nextSlide.Enabled = board.ActiveSlide < count - 1;
+    }
+
+    private void ShowSlideMenu()
+    {
+        ClearMenu(slideMenu.Items);
+        foreach (BoardSlide slide in board.Slides())
+        {
+            var item = new ToolStripMenuItem(slide.Name, null, (_, _) => ShowSlide(slide)) { Checked = slide == board.CurrentSlide };
+            slideMenu.Items.Add(item);
+        }
+        slideMenu.Items.Add(new ToolStripSeparator());
+        slideMenu.Items.Add("Add slide", null, (_, _) => AddSlide());
+        BoardSlide current = board.CurrentSlide;
+        slideMenu.Items.Add(new ToolStripMenuItem($"Delete {current.Name}…", null, (_, _) => DeleteSlide(current)) { Enabled = !IsLastSlide });
+        slideMenu.Show(slideCounter, new Point(0, slideCounter.Height), ToolStripDropDownDirection.BelowLeft);
+    }
+
+    private bool IsLastSlide => board.HorizontalSlideCount == 1;
+
+    private void DeleteSlide(BoardSlide slide)
+    {
+        if (!board.HasSlide(slide) || IsLastSlide) return;
+        int count = board.Notes.Count(note => note.SlideAddress == slide);
+        string question = count == 0 ? $"Delete empty slide {slide.Name}?"
+            : $"Delete {slide.Name}, its {count} {(count == 1 ? "card" : "cards")}, and any connected threads?";
+        if (CorkDialog.Confirm(this, "Delete slide", question, "Delete slide")) CommitSlideDeletion(slide);
+    }
+
+    private void CommitSlideDeletion(BoardSlide slide)
+    {
+        if (!board.HasSlide(slide) || IsLastSlide) return;
+        ClearSelectionMode();
+        StickyNote[] previousNotes = board.Notes.ToArray();
+        NoteThread[] previousThreads = board.Threads.ToArray();
+        BoardSlide previousSlide = board.CurrentSlide;
+        int count = board.HorizontalSlideCount;
+        StickyNote[] removed = previousNotes.Where(note => note.SlideAddress == slide).ToArray();
+        HashSet<Guid> removedIds = removed.Select(note => note.Id).ToHashSet();
+        StickyNote[] shifted = previousNotes.Where(note => note.Slide > slide.Index).ToArray();
+
+        board.Notes.RemoveAll(note => removedIds.Contains(note.Id));
+        board.Threads.RemoveAll(thread => removedIds.Contains(thread.From) || removedIds.Contains(thread.To));
+        foreach (StickyNote note in shifted) note.Slide--;
+        board.HorizontalSlideCount--;
+        if (previousSlide == slide)
+            board.CurrentSlide = new BoardSlide(Math.Min(slide.Index, count - 2));
+        else if (previousSlide.Index > slide.Index)
+            board.ActiveSlide--;
+
+        app.MarkDirty();
+        if (!app.Save())
+        {
+            foreach (StickyNote note in shifted) note.Slide++;
+            board.HorizontalSlideCount = count;
+            board.CurrentSlide = previousSlide;
+            board.Notes.Clear();
+            board.Notes.AddRange(previousNotes);
+            board.Threads.Clear();
+            board.Threads.AddRange(previousThreads);
+            app.MarkDirty();
+            return;
+        }
+
+        foreach (StickyNote note in removed) RemoveNoteView(note);
+        LoadSlide();
+        RefreshSavedNotes();
+    }
+
+    public void ListMoveSlides(StickyNote note, ToolStripMenuItem menu)
+    {
+        ClearMenu(menu.DropDownItems);
+        foreach (BoardSlide target in board.Slides().Where(slide => slide != note.SlideAddress))
+            menu.DropDownItems.Add(target.Name, null, (_, _) => BeginInvoke(() => MoveToSlide(note, target)));
+        menu.Visible = menu.DropDownItems.Count > 0;
+    }
+
+    private void MoveToSlide(StickyNote note, BoardSlide target)
+    {
+        if (!notes.ContainsKey(note.Id) || !board.HasSlide(target) || note.SlideAddress == target) return;
+        ClearSelectionMode();
+        note.SlideAddress = target;
+        if (board.CurrentSlide == target) LoadSlide();
+        FocusNote(note);
+        RefreshSavedNotes();
+        app.MarkDirty();
     }
 
     public void AddNote(Point? click = null)
@@ -256,7 +615,10 @@ internal sealed class BoardWindow : ResizableWindow
         AddNewCard(new StickyNote(), click);
     }
 
-    private void ChooseImage()
+    private void AddTable(Point? click = null) =>
+        AddNewCard(new StickyNote { Table = new TableData(), CardWidth = 344, CardHeight = 246 }, click);
+
+    private void ChooseImage(Point? click = null)
     {
         actions.Visible = false;
         using var picker = new OpenFileDialog
@@ -264,10 +626,10 @@ internal sealed class BoardWindow : ResizableWindow
             Title = "Add image to corkboard", CheckFileExists = true, RestoreDirectory = true,
             Filter = "Images (*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.tif;*.tiff)|*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.tif;*.tiff"
         };
-        if (picker.ShowDialog(this) == DialogResult.OK) AddImage(picker.FileName);
+        if (picker.ShowDialog(this) == DialogResult.OK) AddImage(picker.FileName, click);
     }
 
-    public void AddImage(string path)
+    public void AddImage(string path, Point? click = null)
     {
         string file;
         try { file = app.Images.Import(path); }
@@ -281,7 +643,7 @@ internal sealed class BoardWindow : ResizableWindow
         var note = new StickyNote { ImageFile = file, Label = title, Color = BoardStyle.Linen, CardWidth = 264 };
         Image? photo = ReadImage(note);
         note.CardHeight = photo is null ? 278 : Math.Clamp(80 + (int)Math.Round(239.0 * photo.Height / photo.Width), 205, 368);
-        AddNewCard(note);
+        AddNewCard(note, click);
         app.Save();
     }
 
@@ -289,17 +651,31 @@ internal sealed class BoardWindow : ResizableWindow
     {
         actions.Visible = false;
         ClearSelectionMode();
+        FinishSlideTransition(animate: false);
+        FinishCardEntrance();
+        FinishThreadReveal();
         Size size = LimitCardResize(note, CardArea.Location, PreferredCardSize(note));
-        Point position = click is Point point ? new Point(point.X - Pixels(14), point.Y - Pixels(15)) : NextOpenPosition(size);
+        Point? openPosition = click.HasValue ? null : NextOpenPosition(size);
+        Point position = click is Point point ? new Point(point.X - Pixels(14), point.Y - Pixels(15))
+            : openPosition ?? CardArea.Location + new Size(Pixels(18) * (cards.Count % 7), Pixels(18) * (cards.Count % 7));
         Point fitted = LimitCardMove(position, size);
         if (note.ImageFile is null) note.Color = board.Notes.Count % BoardStyle.Colors.Length;
+        note.SlideAddress = board.CurrentSlide;
         board.Notes.Add(note);
+        notes.Add(note.Id, note);
         MoveNote(note, fitted.X, fitted.Y);
-        AddCard(note);
+        bool reveal = Visible && AnimationsEnabled;
+        NoteCard card = AddCard(note, visible: !reveal);
+        if (reveal)
+        {
+            BeginCardEntrance([card]);
+            card.Show();
+        }
         UpdateEmptyState();
         FocusNote(note);
         RefreshSavedNotes();
         app.MarkDirty();
+        if (click is null && openPosition is null) ShowNotice("Need more room? Click + to add a slide.");
     }
 
     public bool CanMoveNote(StickyNote note) => !note.Pinned || movePinned == note.Id;
@@ -342,6 +718,11 @@ internal sealed class BoardWindow : ResizableWindow
                 Guid other = thread.From == card.Note.Id ? thread.To : thread.To == card.Note.Id ? thread.From : Guid.Empty;
                 if (cards.TryGetValue(other, out NoteCard? endpoint))
                     dirty = Rectangle.Union(dirty, new Rectangle(endpoint.PinPointOnParent, new Size(1, 1)));
+                else if (notes.TryGetValue(other, out StickyNote? remote))
+                {
+                    dirty = Rectangle.Union(dirty, PreviewBounds(SlideEdge(previousPin, remote.SlideAddress),
+                        SlideEdge(card.PinPointOnParent, remote.SlideAddress)));
+                }
             }
         }
         dirty.Inflate(Pixels(3), Pixels(3));
@@ -382,10 +763,41 @@ internal sealed class BoardWindow : ResizableWindow
         if (note.Text == text && note.FormattedText == rtf) return;
         note.Text = text;
         note.FormattedText = rtf;
+        RefreshNoteText(note, sender);
+        app.MarkDirty();
+    }
+
+    public void ChangeTimestampFormat(StickyNote note, NoteTimestampFormat format)
+    {
+        if (note.TimestampFormat == format) return;
+        note.TimestampFormat = format;
+        app.MarkDirty();
+    }
+
+    public void RefreshNoteText(StickyNote note, NoteCard? sender = null)
+    {
         if (cards.TryGetValue(note.Id, out NoteCard? card) && card != sender) card.ReadText();
         if (floating.TryGetValue(note.Id, out FloatingNote? popup) && popup.Card != sender) popup.Card.ReadText();
         if (drawerClip.Visible) RefreshSavedNotes();
+    }
+
+    public void ChangeTable(StickyNote note, NoteCard sender)
+    {
+        if (cards.TryGetValue(note.Id, out NoteCard? card) && card != sender) card.RefreshTable();
+        if (floating.TryGetValue(note.Id, out FloatingNote? popup) && popup.Card != sender) popup.Card.RefreshTable();
         app.MarkDirty();
+    }
+
+    public void CommitTableEdits()
+    {
+        foreach (NoteCard card in cards.Values) card.CommitTableEdit();
+        foreach (FloatingNote popup in floating.Values) popup.Card.CommitTableEdit();
+    }
+
+    public void EditChecklistReset(StickyNote note, Form owner)
+    {
+        if (ChecklistResetPrompt.Show(owner, note.DailyChecklistReset, out TimeOnly? time))
+            app.SetChecklistReset(note, time);
     }
 
     public void EditLabel(StickyNote note, Form owner)
@@ -393,11 +805,11 @@ internal sealed class BoardWindow : ResizableWindow
         string? label = NamePrompt.Show(owner, "Label note", "Category or label", note.Label, 45);
         if (label is null || label == note.Label) return;
         note.Label = label;
-        cards[note.Id].RefreshLabel();
+        if (cards.TryGetValue(note.Id, out NoteCard? card)) card.RefreshLabel();
         if (floating.TryGetValue(note.Id, out FloatingNote? popup))
         {
             popup.Card.RefreshLabel();
-            popup.Text = string.IsNullOrWhiteSpace(label) ? "Sticky note" : label;
+            popup.Text = string.IsNullOrWhiteSpace(label) ? (note.Table is null ? "Sticky note" : "Table") : label;
         }
         RefreshSavedNotes();
         app.MarkDirty();
@@ -407,7 +819,7 @@ internal sealed class BoardWindow : ResizableWindow
     {
         if (note.Color == color) return;
         note.Color = color;
-        cards[note.Id].ApplyColor();
+        if (cards.TryGetValue(note.Id, out NoteCard? card)) card.ApplyColor();
         if (floating.TryGetValue(note.Id, out FloatingNote? popup)) popup.ApplyColor(color);
         if (board.Threads.Any(thread => thread.From == note.Id && thread.Color is null)) canvas.Invalidate();
         app.MarkDirty();
@@ -425,7 +837,7 @@ internal sealed class BoardWindow : ResizableWindow
     {
         if (note.Pinned == pinned) return;
         note.Pinned = pinned;
-        cards[note.Id].RefreshPin();
+        if (cards.TryGetValue(note.Id, out NoteCard? card)) card.RefreshPin();
         if (!pinned)
         {
             FinishPinnedMove(note);
@@ -444,6 +856,7 @@ internal sealed class BoardWindow : ResizableWindow
             bool added = !board.Threads.Any(thread => thread.From == source && thread.To == note.Id || thread.From == note.Id && thread.To == source);
             if (added)
             {
+                FinishThreadReveal();
                 SetPinned(note, true);
                 board.Threads.Add(new NoteThread { From = source, To = note.Id });
                 canvas.Invalidate();
@@ -465,7 +878,7 @@ internal sealed class BoardWindow : ResizableWindow
         connectFrom = note.Id;
         Application.AddMessageFilter(threadInput);
         UpdateThreadPointer(canvas.PointToClient(Cursor.Position));
-        ShowNotice("Click a note · Esc to cancel", true);
+        ShowNotice("Click a card or change slides · Esc to cancel", true);
     }
 
     public void ListThreadColors(StickyNote note, ToolStripMenuItem menu)
@@ -482,13 +895,31 @@ internal sealed class BoardWindow : ResizableWindow
         foreach (NoteThread thread in connected)
         {
             Guid other = thread.From == note.Id ? thread.To : thread.From;
-            StickyNote? destination = board.Notes.Find(candidate => candidate.Id == other);
-            if (destination is null) continue;
-            var item = new ToolStripMenuItem(ThreadCaption(destination).Replace("&", "&&"));
+            if (!notes.TryGetValue(other, out StickyNote? destination)) continue;
+            var item = new CorkSubmenuItem(ThreadCaption(destination).Replace("&", "&&"));
             AddThreadColors(item.DropDownItems, thread);
             menu.DropDownItems.Add(item);
         }
     }
+
+    public void ListSlideConnections(StickyNote note, ToolStripMenuItem menu)
+    {
+        ClearMenu(menu.DropDownItems);
+        foreach (NoteThread thread in board.Threads)
+        {
+            Guid other = thread.From == note.Id ? thread.To : thread.To == note.Id ? thread.From : Guid.Empty;
+            if (notes.TryGetValue(other, out StickyNote? remote) && remote.SlideAddress != note.SlideAddress)
+                menu.DropDownItems.Add(JumpToConnection(remote, fromPin: true));
+        }
+        menu.Visible = menu.DropDownItems.Count > 0;
+    }
+
+    private ToolStripMenuItem JumpToConnection(StickyNote remote, bool fromPin = false) =>
+        new($"{remote.SlideAddress.Name} · {ThreadCaption(remote).Replace("&", "&&")}", null, (_, _) =>
+        {
+            if (fromPin) BeginInvoke(() => FocusNote(remote));
+            else FocusNote(remote);
+        });
 
     public void PopOut(StickyNote note)
     {
@@ -521,6 +952,7 @@ internal sealed class BoardWindow : ResizableWindow
         if (connectFrom == note.Id) ClearSelectionMode();
         if (floating.TryGetValue(note.Id, out FloatingNote? popup)) popup.Close();
         if (cards.Remove(note.Id, out NoteCard? card)) card.Dispose();
+        notes.Remove(note.Id);
         if (images.Remove(note.Id, out Image? image)) image?.Dispose();
         UpdateEmptyState();
         canvas.Invalidate();
@@ -538,13 +970,14 @@ internal sealed class BoardWindow : ResizableWindow
         RefreshSavedNotes();
     }
 
-    private void MinimizeBoard()
+    public void MinimizeBoard()
     {
         if (!Visible || hiding) return;
         hiding = true;
         try
         {
             actions.Visible = false;
+            CommitTableEdits();
             ClearSelectionMode();
             RememberBounds();
             if (!app.CanHideInTray(board))
@@ -568,7 +1001,8 @@ internal sealed class BoardWindow : ResizableWindow
         var panel = new Panel { BackColor = BoardStyle.Paper, Visible = false };
         var stack = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false, Padding = new Padding(8) };
         Add("＋  Add note", () => AddNote());
-        Add("▧  Add image…", ChooseImage);
+        Add("▧  Add image…", () => ChooseImage());
+        Add("▤  Add table", () => AddTable());
         Add("●  Add pin", () => { actions.Visible = false; ClearSelectionMode(); selectPin = true; ShowNotice("Click a pin · Esc to cancel", true); });
         Add("≡  Corkboards", () => { actions.Visible = false; AnimateDrawer(true); });
         Separator();
@@ -714,12 +1148,18 @@ internal sealed class BoardWindow : ResizableWindow
             drawerClip.Visible = true;
         }
         LayoutBoard();
-        drawerMotion.Start();
+        if (AnimationsEnabled) drawerMotion.Start();
+        else SetDrawerWidth(open ? DrawerWidth : 0);
     }
 
     private void SlideDrawer()
     {
         int next = Math.Clamp(drawerClip.Width + (drawerOpening ? Pixels(40) : -Pixels(40)), 0, DrawerWidth);
+        SetDrawerWidth(next);
+    }
+
+    private void SetDrawerWidth(int next)
+    {
         drawerClip.Width = next;
         drawer.Left = next - DrawerWidth;
         if (next != (drawerOpening ? DrawerWidth : 0)) return;
@@ -731,43 +1171,58 @@ internal sealed class BoardWindow : ResizableWindow
     private void LayoutBoard()
     {
         int inset = Frame;
-        int shelfHeight = Pixels(48);
-        canvas.Bounds = new Rectangle(inset, inset + shelfHeight, Math.Max(0, ClientSize.Width - inset * 2),
-            Math.Max(0, ClientSize.Height - inset * 2 - shelfHeight));
+        Rectangle surface = new(inset, TopFrame, Math.Max(0, ClientSize.Width - inset * 2),
+            Math.Max(0, ClientSize.Height - TopFrame - inset));
+        if (corkViewport.Bounds != surface)
+        {
+            FinishSlideTransition(animate: false);
+            corkViewport.Bounds = surface;
+            canvas.Bounds = corkViewport.ClientRectangle;
+        }
         if (WindowState != FormWindowState.Minimized && canvas.ClientSize.Width > 0 && canvas.ClientSize.Height > 0)
-            foreach (StickyNote note in board.Notes)
-                if (cards.TryGetValue(note.Id, out NoteCard? card)) card.Bounds = PreferredCardBounds(note);
+            foreach (NoteCard card in cards.Values) card.Bounds = PreferredCardBounds(card.Note);
         emptyState.Location = new Point(Math.Max(8, (canvas.ClientSize.Width - emptyState.Width) / 2), Math.Max(8, (canvas.ClientSize.Height - emptyState.Height) / 2));
-        fab.Location = new Point(inset + Pixels(12), inset + Pixels(5));
+        fab.Location = new Point(inset + Pixels(6), Pixels(8));
+        int navigationWidth = Pixels(132);
+        slideControls.Bounds = new Rectangle(corkViewport.Right - Pixels(6) - navigationWidth, Pixels(8), navigationWidth, Pixels(22));
+        BoardStyle.RoundCorners(slideControls, Pixels(11));
+        previousSlide.Bounds = new Rectangle(Pixels(4), Pixels(1), Pixels(22), Pixels(20));
+        slideCounter.Bounds = new Rectangle(Pixels(26), Pixels(1), Pixels(56), Pixels(20));
+        nextSlide.Bounds = new Rectangle(Pixels(82), Pixels(1), Pixels(22), Pixels(20));
+        addSlide.Bounds = new Rectangle(Pixels(104), Pixels(1), Pixels(24), Pixels(20));
         RefreshMenuButton();
-        actions.Bounds = new Rectangle(fab.Left, canvas.Top + Pixels(4), Pixels(202), Pixels(304));
+        actions.Bounds = new Rectangle(fab.Left, corkViewport.Top + Pixels(4), Pixels(202), Pixels(334));
         BoardStyle.RoundCorners(actions, Pixels(8));
-        drawerClip.Location = new Point(fab.Left, canvas.Top + Pixels(4));
-        drawerClip.Height = Math.Max(0, canvas.Bottom - drawerClip.Top - Pixels(9));
+        drawerClip.Location = new Point(fab.Left, corkViewport.Top + Pixels(4));
+        drawerClip.Height = Math.Max(0, corkViewport.Bottom - drawerClip.Top - Pixels(9));
         drawer.Size = new Size(DrawerWidth, drawerClip.Height);
         BoardStyle.RoundCorners(drawer, Pixels(8));
+        int hintWidth = TextRenderer.MeasureText(shortcutHint.Text, shortcutHint.Font).Width;
+        shortcutHint.Bounds = new Rectangle(inset + Pixels(8), corkViewport.Bottom + Pixels(2),
+            Math.Min(hintWidth, Math.Max(0, canvas.Width - Pixels(16))), Pixels(20));
         LayoutNotice();
+
     }
 
     private void LayoutNotice()
     {
-        int right = canvas.Right - Pixels(12);
-        int room = Math.Max(1, right - fab.Left - Pixels(155));
+        int right = corkViewport.Right - Pixels(8);
+        int room = Math.Max(0, right - shortcutHint.Right - Pixels(8));
         int measured = TextRenderer.MeasureText(notice.Text, notice.Font).Width + Pixels(24);
         int width = Math.Min(room, measured);
-        int height = Pixels(28);
-        notice.Bounds = new Rectangle(right - width, fab.Top + (fab.Height - height) / 2, width, height);
-        BoardStyle.RoundCorners(notice, Pixels(14));
+        int height = Pixels(20);
+        notice.Bounds = new Rectangle(right - width, corkViewport.Bottom + Pixels(2), width, height);
+        BoardStyle.RoundCorners(notice, Pixels(10));
     }
 
     private void RefreshMenuButton()
     {
         bool expanded = menuHovered || fab.Focused;
-        Size size = new(Pixels(expanded ? 145 : 38), Pixels(38));
+        Size size = new(Pixels(expanded ? 105 : 22), Pixels(22));
         if (fab.Size != size)
         {
             fab.Size = size;
-            BoardStyle.RoundCorners(fab, Pixels(19));
+            BoardStyle.RoundCorners(fab, Pixels(11));
         }
         fab.Text = expanded ? (actions.Visible || drawerClip.Visible ? "Close menu" : "Board menu") : "";
         fab.Invalidate();
@@ -776,13 +1231,13 @@ internal sealed class BoardWindow : ResizableWindow
     private void PaintMenuGlyph(object? sender, PaintEventArgs e)
     {
         e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-        int centerX = Pixels(19);
+        int centerX = Pixels(11);
         int centerY = fab.Height / 2;
-        int radius = Pixels(13);
+        int radius = Pixels(8);
         using var accent = new SolidBrush(BoardStyle.Brick);
-        using var line = new Pen(Color.White, Pixels(2)) { StartCap = LineCap.Round, EndCap = LineCap.Round };
+        using var line = new Pen(Color.White, Pixels(1)) { StartCap = LineCap.Round, EndCap = LineCap.Round };
         e.Graphics.FillEllipse(accent, centerX - radius, centerY - radius, radius * 2, radius * 2);
-        int stroke = Pixels(4);
+        int stroke = Pixels(3);
         if (actions.Visible || drawerClip.Visible)
         {
             e.Graphics.DrawLine(line, centerX - stroke, centerY - stroke, centerX + stroke, centerY + stroke);
@@ -810,20 +1265,20 @@ internal sealed class BoardWindow : ResizableWindow
 
     private void UpdateEmptyState()
     {
-        emptyState.Visible = board.Notes.Count == 0;
+        emptyState.Visible = cards.Count == 0;
         if (emptyState.Visible) LayoutBoard();
     }
 
-    private NoteCard AddCard(StickyNote note)
+    private NoteCard AddCard(StickyNote note, bool visible = true)
     {
-        var card = new NoteCard(this, note, floating: false, image: ReadImage(note)) { Bounds = PreferredCardBounds(note) };
+        var card = new NoteCard(this, note, floating: false, image: ReadImage(note)) { Bounds = PreferredCardBounds(note), Visible = visible };
         cards.Add(note.Id, card);
         canvas.Controls.Add(card);
         card.BringToFront();
         return card;
     }
 
-    private Point NextOpenPosition(Size size)
+    private Point? NextOpenPosition(Size size)
     {
         Rectangle area = CardArea;
         int gap = Pixels(14);
@@ -833,12 +1288,10 @@ internal sealed class BoardWindow : ResizableWindow
                 var slot = new Rectangle(new Point(x, y), size);
                 if (!cards.Values.Any(card => card.Bounds.IntersectsWith(slot))) return slot.Location;
             }
-        int offset = Pixels(18) * (cards.Count % 7);
-        return LimitCardMove(new Point(area.Left + offset, area.Top + offset), size);
+        return null;
     }
 
-    private Rectangle CardArea => new(Pixels(12), Pixels(12), Math.Max(1, canvas.ClientSize.Width - Pixels(24)),
-        Math.Max(1, canvas.ClientSize.Height - Pixels(24)));
+    private Rectangle CardArea => canvas.ClientRectangle;
 
     private Size PreferredCardSize(StickyNote note)
     {
@@ -879,6 +1332,7 @@ internal sealed class BoardWindow : ResizableWindow
             {
                 floating.Remove(note.Id);
                 if (closing) return;
+                if (!cards.ContainsKey(note.Id) && images.Remove(note.Id, out Image? image)) image?.Dispose();
                 note.PoppedOut = false;
                 app.MarkDirty();
             };
@@ -893,32 +1347,57 @@ internal sealed class BoardWindow : ResizableWindow
 
     private void DrawThreads(Graphics graphics)
     {
+        if (slideMotion.Enabled) return;
         if (board.Threads.Count == 0 && threadPointer is null) return;
         graphics.SmoothingMode = SmoothingMode.AntiAlias;
         using var pen = new Pen(Color.Black, Pixels(2)) { StartCap = LineCap.Round, EndCap = LineCap.Round };
+        using var marker = new SolidBrush(Color.Black);
         foreach (NoteThread thread in board.Threads)
         {
-            if (!TryEndpoints(thread, out Point start, out Point end)) continue;
+            if (threadReveal <= 0 || !TryEndpoints(thread, out Point start, out Point end)) continue;
             pen.Color = ResolveThreadColor(thread);
-            graphics.DrawLine(pen, start, end);
+            graphics.DrawLine(pen, start, RevealedEndpoint(start, end));
+            if (!cards.ContainsKey(thread.From)) DrawEdgeMarker(start);
+            if (threadReveal >= 1 && !cards.ContainsKey(thread.To)) DrawEdgeMarker(end);
         }
-        if (threadPointer is Point pointer && connectFrom is Guid source && cards.TryGetValue(source, out NoteCard? card))
+        if (threadPointer is Point pointer && connectFrom is Guid source && notes.TryGetValue(source, out StickyNote? note))
         {
-            pen.Color = BoardStyle.NoteAccent(card.Note.Color);
+            pen.Color = BoardStyle.NoteAccent(note.Color);
             pen.DashStyle = DashStyle.Dash;
-            graphics.DrawLine(pen, card.PinPointOnParent, pointer);
+            graphics.DrawLine(pen, PreviewAnchor(note, pointer), pointer);
+        }
+
+        void DrawEdgeMarker(Point point)
+        {
+            int radius = Pixels(4);
+            marker.Color = pen.Color;
+            graphics.FillEllipse(marker, point.X - radius, point.Y - radius, radius * 2, radius * 2);
         }
     }
 
     private void CanvasClick(object? sender, MouseEventArgs e)
     {
         actions.Visible = false;
-        if (HitThread(e.Location) is not NoteThread thread || selectPin || connectFrom.HasValue) return;
+        if (slideMotion.Enabled || selectPin || connectFrom.HasValue) return;
+        if (HitThread(e.Location) is not NoteThread thread)
+        {
+            if (e.Button == MouseButtons.Right && canvas.ClientRectangle.Contains(e.Location)
+                && canvas.GetChildAtPoint(e.Location, GetChildAtPointSkip.Invisible) is null)
+            {
+                canvasMenuPosition = e.Location;
+                canvasMenu.Show(canvas, e.Location);
+            }
+            return;
+        }
         ClearMenu(threadMenu.Items);
         threadMenu.SetSurface(ResolveThreadColor(thread));
-        string from = ThreadCaption(cards[thread.From].Note);
-        string to = ThreadCaption(cards[thread.To].Note);
+        StickyNote source = notes[thread.From];
+        StickyNote destination = notes[thread.To];
+        string from = ThreadCaption(source);
+        string to = ThreadCaption(destination);
         threadMenu.Items.Add(new ToolStripLabel($"{from}  ↔  {to}"));
+        if (source.SlideAddress != destination.SlideAddress)
+            threadMenu.Items.Add(JumpToConnection(source.SlideAddress == board.CurrentSlide ? destination : source));
         threadMenu.Items.Add(new ToolStripSeparator());
         AddThreadColors(threadMenu.Items, thread);
         threadMenu.Items.Add(new ToolStripSeparator());
@@ -953,8 +1432,8 @@ internal sealed class BoardWindow : ResizableWindow
     {
         if (thread.Color is int color)
             return BoardStyle.ThreadColors[Math.Clamp(color, 0, BoardStyle.ThreadColors.Length - 1)].Color;
-        return cards.TryGetValue(thread.From, out NoteCard? from)
-            ? BoardStyle.NoteAccent(from.Note.Color) : BoardStyle.ThreadColors[0].Color;
+        return notes.TryGetValue(thread.From, out StickyNote? from)
+            ? BoardStyle.NoteAccent(from.Color) : BoardStyle.ThreadColors[0].Color;
     }
 
     private static string ThreadCaption(StickyNote note)
@@ -970,7 +1449,8 @@ internal sealed class BoardWindow : ResizableWindow
 
     private NoteThread? HitThread(Point point) => board.Threads.LastOrDefault(thread =>
     {
-        if (!TryEndpoints(thread, out Point start, out Point end)) return false;
+        if (threadReveal <= 0 || !TryEndpoints(thread, out Point start, out Point end)) return false;
+        end = RevealedEndpoint(start, end);
         double dx = end.X - start.X;
         double dy = end.Y - start.Y;
         double squaredLength = dx * dx + dy * dy;
@@ -982,14 +1462,30 @@ internal sealed class BoardWindow : ResizableWindow
         return x * x + y * y <= radius * radius;
     });
 
+    private Point RevealedEndpoint(Point start, Point end) => new(
+        start.X + (int)Math.Round((end.X - start.X) * threadReveal),
+        start.Y + (int)Math.Round((end.Y - start.Y) * threadReveal));
+
     private bool TryEndpoints(NoteThread thread, out Point start, out Point end)
     {
         start = end = Point.Empty;
-        if (!cards.TryGetValue(thread.From, out NoteCard? from) || !cards.TryGetValue(thread.To, out NoteCard? to)) return false;
-        start = from.PinPointOnParent;
-        end = to.PinPointOnParent;
+        if (!notes.TryGetValue(thread.From, out StickyNote? source) || !notes.TryGetValue(thread.To, out StickyNote? destination)) return false;
+        cards.TryGetValue(thread.From, out NoteCard? from);
+        cards.TryGetValue(thread.To, out NoteCard? to);
+        if (from is null && to is null) return false;
+        start = from?.PinPointOnParent ?? SlideEdge(to!.PinPointOnParent, source.SlideAddress);
+        end = to?.PinPointOnParent ?? SlideEdge(start, destination.SlideAddress);
         return true;
     }
+
+    private Point SlideEdge(Point aligned, BoardSlide slide)
+    {
+        int margin = Pixels(6);
+        return new Point(slide.Index > board.ActiveSlide ? canvas.Width - margin : margin, aligned.Y);
+    }
+
+    private Point PreviewAnchor(StickyNote source, Point pointer) =>
+        cards.TryGetValue(source.Id, out NoteCard? from) ? from.PinPointOnParent : SlideEdge(pointer, source.SlideAddress);
 
     private void ClearSelectionMode()
     {
@@ -1011,7 +1507,7 @@ internal sealed class BoardWindow : ResizableWindow
 
     private void UpdateThreadPointer(Point wanted)
     {
-        if (connectFrom is not Guid source || !cards.TryGetValue(source, out NoteCard? from)) return;
+        if (slideMotion.Enabled || connectFrom is not Guid source || !notes.TryGetValue(source, out StickyNote? from)) return;
         var next = new Point(Math.Clamp(wanted.X, 0, Math.Max(0, canvas.ClientSize.Width - 1)),
             Math.Clamp(wanted.Y, 0, Math.Max(0, canvas.ClientSize.Height - 1)));
         NoteCard? target = TargetAt(wanted);
@@ -1022,10 +1518,9 @@ internal sealed class BoardWindow : ResizableWindow
             target?.SetConnectionTarget(true);
         }
         if (threadPointer == next) return;
-        Point anchor = from.PinPointOnParent;
-        if (threadPointer is Point previous) canvas.Invalidate(PreviewBounds(anchor, previous));
+        if (threadPointer is Point previous) canvas.Invalidate(PreviewBounds(PreviewAnchor(from, previous), previous));
         threadPointer = next;
-        canvas.Invalidate(PreviewBounds(anchor, next));
+        canvas.Invalidate(PreviewBounds(PreviewAnchor(from, next), next));
     }
 
     private NoteCard? TargetAt(Point point)
@@ -1038,7 +1533,7 @@ internal sealed class BoardWindow : ResizableWindow
         Rectangle.FromLTRB(Math.Min(from.X, to.X), Math.Min(from.Y, to.Y), Math.Max(from.X, to.X) + 1, Math.Max(from.Y, to.Y) + 1),
         Pixels(4), Pixels(4));
 
-    private void RememberBounds()
+    internal void RememberBounds()
     {
         TrackNormalBounds();
         if (!initialized || (hiddenBounds ?? lastNormalBounds) is not Rectangle wanted || board.Bounds == wanted) return;
@@ -1073,6 +1568,7 @@ internal sealed class BoardWindow : ResizableWindow
             }
             if (control != window.canvas && !window.canvas.Contains(control))
             {
+                if (window.slideControls.Contains(control)) return false;
                 window.ClearSelectionMode();
                 return false;
             }
@@ -1103,6 +1599,7 @@ internal sealed class BoardWindow : ResizableWindow
     private sealed record NoteListItem(StickyNote Note)
     {
         public string Caption => !string.IsNullOrWhiteSpace(Note.Label) ? Note.Label
-            : Note.ImageFile is not null ? "Image" : Note.Text.Split(['\r', '\n'], 2)[0].Trim() is { Length: > 0 } first ? first : "Untitled note";
+            : Note.Table is not null ? "Table" : Note.ImageFile is not null ? "Image"
+            : Note.Text.Split(['\r', '\n'], 2)[0].Trim() is { Length: > 0 } first ? first : "Untitled note";
     }
 }

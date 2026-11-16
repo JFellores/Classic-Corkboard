@@ -4,7 +4,12 @@ namespace Corkboard;
 
 internal class ResizableWindow : Form
 {
+    internal static bool AnimationsEnabled =>
+        SystemParametersInfo(0x1042, 0, out int enabled, 0) && enabled != 0;
+
     protected virtual int FrameDragWidth => 0;
+    protected virtual int TopFrameDragWidth => FrameDragWidth;
+    protected virtual bool IsFrameCommand(Point point) => false;
 
     public ResizableWindow()
     {
@@ -50,7 +55,9 @@ internal class ResizableWindow : Form
         }
 
         int frame = LogicalToDeviceUnits(FrameDragWidth);
-        if (point.X < frame || point.Y < frame || point.X >= ClientSize.Width - frame || point.Y >= ClientSize.Height - frame)
+        int topFrame = LogicalToDeviceUnits(TopFrameDragWidth);
+        if (!IsFrameCommand(point) && (point.X < frame || point.Y < topFrame
+            || point.X >= ClientSize.Width - frame || point.Y >= ClientSize.Height - frame))
             message.Result = new IntPtr(2);
     }
 
@@ -75,5 +82,9 @@ internal class ResizableWindow : Form
 
     [DllImport("user32.dll", EntryPoint = "SendMessageW")]
     private static extern IntPtr SendMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll", EntryPoint = "SystemParametersInfoW")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SystemParametersInfo(uint action, uint parameter, out int value, uint flags);
 }
 

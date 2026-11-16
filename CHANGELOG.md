@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.3 — Add slides, checklists, and table cards
+
+- Added numbered slides with no scrollbars on the cork surface. After each slide settles, its cards pop in and threads draw from their source pins. Right-click the cork to add a note, image, or table. Table cards support range selection, copy and paste, editable rows and columns, and five aggregate functions. Click or drag across cells while writing a formula to insert their reference. Select note text to turn it into a checklist item, change its size, or turn it into a clickable web link. Choose a daily checklist reset time on any note. Press Ctrl+Alt+B to minimize or restore the corkboard from any app.
+
 ## 0.6.0 — Move pinned notes and identify thread connections
 
 - Moved the compact Board menu above the notes and added hover and keyboard focus to reveal its label. Menu backgrounds match the note paper or the selected thread. Threads show the labels of connected cards. Hold and drag a card’s pin to move it with its threads attached. Fixed the detached Corkboards submenu in the Windows tray.

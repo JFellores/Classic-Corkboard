@@ -15,7 +15,13 @@ internal sealed class BoardData
     {
         if (Boards.Count == 0) Boards.Add(new CorkBoard { Name = "My corkboard", Notes = LegacyNotes ?? [] });
         LegacyNotes = null;
+        foreach (CorkBoard board in Boards) board.UpgradeSlides();
     }
+}
+
+internal readonly record struct BoardSlide(int Index)
+{
+    public string Name => $"Slide {Index + 1}";
 }
 
 internal sealed class CorkBoard
@@ -24,8 +30,62 @@ internal sealed class CorkBoard
     public string Name { get; set; } = "Corkboard";
     public List<StickyNote> Notes { get; init; } = [];
     public List<NoteThread> Threads { get; init; } = [];
+    public int HorizontalSlideCount { get; set; } = 1;
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingDefault)]
+    public int VerticalSlideCount { get; set; }
+    public int ActiveSlide { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingDefault)]
+    public bool ActiveSlideVertical { get; set; }
+    [System.Text.Json.Serialization.JsonPropertyName("SlideCount")]
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public int? LegacySlideCount { get; set; }
     public Rectangle? Bounds { get; set; }
     public bool WasOpen { get; set; }
+
+    [System.Text.Json.Serialization.JsonIgnore]
+    public BoardSlide CurrentSlide
+    {
+        get => new(ActiveSlide);
+        set => ActiveSlide = value.Index;
+    }
+
+    public bool HasSlide(BoardSlide slide) => slide.Index >= 0 && slide.Index < HorizontalSlideCount;
+
+    public IEnumerable<BoardSlide> Slides()
+    {
+        for (int i = 0; i < HorizontalSlideCount; i++) yield return new BoardSlide(i);
+    }
+
+    public void UpgradeSlides()
+    {
+        if (LegacySlideCount is int count)
+        {
+            HorizontalSlideCount = count;
+            LegacySlideCount = null;
+            return;
+        }
+
+        if (VerticalSlideCount == 0 && !ActiveSlideVertical && Notes?.Any(note => note?.SlideVertical == true) != true) return;
+        int horizontal = HorizontalSlideCount;
+        long total = (long)horizontal + VerticalSlideCount;
+        if (horizontal < 0 || VerticalSlideCount < 0 || total is < 1 or > int.MaxValue ||
+            ActiveSlide < 0 || ActiveSlide >= (ActiveSlideVertical ? VerticalSlideCount : horizontal))
+            throw new JsonException("The saved slides are invalid.");
+        if (Notes is not null)
+        {
+            foreach (StickyNote note in Notes.Where(note => note is not null))
+            {
+                if (note.Slide < 0 || note.Slide >= (note.SlideVertical ? VerticalSlideCount : horizontal))
+                    throw new JsonException("The saved slides are invalid.");
+                if (note.SlideVertical) note.Slide += horizontal;
+                note.SlideVertical = false;
+            }
+        }
+        if (ActiveSlideVertical) ActiveSlide += horizontal;
+        HorizontalSlideCount = (int)total;
+        VerticalSlideCount = 0;
+        ActiveSlideVertical = false;
+    }
 }
 
 internal sealed class StickyNote
@@ -33,14 +93,31 @@ internal sealed class StickyNote
     public Guid Id { get; init; } = Guid.NewGuid();
     public string Text { get; set; } = "";
     public string? FormattedText { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingDefault)]
+    public NoteTimestampFormat TimestampFormat { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public TimeOnly? DailyChecklistReset { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public DateOnly? LastChecklistReset { get; set; }
     public string Label { get; set; } = "";
     public string? ImageFile { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public TableData? Table { get; set; }
     public bool Pinned { get; set; }
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public int? PinColor { get; set; }
     public int Color { get; set; }
     public int X { get; set; }
     public int Y { get; set; }
+    public int Slide { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingDefault)]
+    public bool SlideVertical { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore]
+    public BoardSlide SlideAddress
+    {
+        get => new(Slide);
+        set => Slide = value.Index;
+    }
     public int CardWidth { get; set; }
     public int CardHeight { get; set; }
     public bool PoppedOut { get; set; }
@@ -116,7 +193,10 @@ internal sealed class NoteStore(string folder)
         data.Upgrade();
         if (data.Boards.Select(board => board.Id).Distinct().Count() != data.Boards.Count || data.Boards.Any(board =>
             board.Name is null || board.Notes is null || board.Threads is null || board.Threads.Any(thread => thread is null)
+            || board.HorizontalSlideCount < 0 || board.VerticalSlideCount < 0 || !board.HasSlide(board.CurrentSlide)
             || board.Notes.Any(note => note is null || note.Text is null || note.Label is null)
+            || board.Notes.Any(note => note.Table is { IsValid: false } || (note.Table is not null && note.ImageFile is not null))
+            || board.Notes.Any(note => !board.HasSlide(note.SlideAddress))
             || board.Notes.Select(note => note.Id).Distinct().Count() != board.Notes.Count))
             throw new JsonException("The board file is invalid.");
         return data;

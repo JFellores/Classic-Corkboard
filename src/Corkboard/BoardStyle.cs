@@ -35,9 +35,9 @@ internal static class BoardStyle
         ("Linen", Color.FromArgb(255, 247, 229), Color.FromArgb(230, 215, 183))
     ];
 
-    public static Button Button(string text, Color fill, Color ink)
+    public static Button Button(string text, Color fill, Color ink, bool compactText = false)
     {
-        var button = new CommandButton
+        var button = new CommandButton(compactText)
         {
             Text = text, BackColor = fill, ForeColor = ink, FlatStyle = FlatStyle.Flat,
             Cursor = Cursors.Hand, UseVisualStyleBackColor = false, Margin = Padding.Empty
@@ -86,7 +86,7 @@ internal static class BoardStyle
         return path;
     }
 
-    private sealed class CommandButton : Button
+    private sealed class CommandButton(bool compactText) : Button
     {
         protected override void OnSizeChanged(EventArgs e)
         {
@@ -105,7 +105,16 @@ internal static class BoardStyle
 
         protected override void OnPaint(PaintEventArgs e)
         {
-            base.OnPaint(e);
+            if (compactText)
+            {
+                bool hovered = Enabled && ClientRectangle.Contains(PointToClient(Cursor.Position));
+                using var fill = new SolidBrush(hovered ? FlatAppearance.MouseOverBackColor : BackColor);
+                e.Graphics.FillRectangle(fill, ClientRectangle);
+                TextRenderer.DrawText(e.Graphics, Text, Font, ClientRectangle, Enabled ? ForeColor : Muted,
+                    TextFormatFlags.SingleLine | TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter
+                    | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
+            }
+            else base.OnPaint(e);
             if (!Focused || !ShowFocusCues || Width < 10 || Height < 10) return;
             ControlPaint.DrawFocusRectangle(e.Graphics, Rectangle.Inflate(ClientRectangle, -3, -3), ForeColor, BackColor);
         }
@@ -172,23 +181,23 @@ internal static class BoardStyle
         return bitmap;
     }
 
-    public static void DrawFrame(Graphics graphics, int width, int height, int frame)
+    public static void DrawFrame(Graphics graphics, int width, int height, int frame, int topFrame)
     {
-        if (width < frame * 2 || height < frame * 2) return;
-        DrawSide([new(0, 0), new(width, 0), new(width - frame, frame), new(frame, frame)],
-            [new(0, 0), new(width, 0), new(0, frame)]);
-        DrawSide([new(width, 0), new(width, height), new(width - frame, height - frame), new(width - frame, frame)],
+        if (width < frame * 2 || height < topFrame + frame) return;
+        DrawSide([new(0, 0), new(width, 0), new(width - frame, topFrame), new(frame, topFrame)],
+            [new(0, 0), new(width, 0), new(0, topFrame)]);
+        DrawSide([new(width, 0), new(width, height), new(width - frame, height - frame), new(width - frame, topFrame)],
             [new(width, 0), new(width, height), new(width - frame, 0)]);
         DrawSide([new(width, height), new(0, height), new(frame, height - frame), new(width - frame, height - frame)],
             [new(width, height), new(0, height), new(width, height - frame)]);
-        DrawSide([new(0, height), new(0, 0), new(frame, frame), new(frame, height - frame)],
+        DrawSide([new(0, height), new(0, 0), new(frame, topFrame), new(frame, height - frame)],
             [new(0, height), new(0, 0), new(frame, height)]);
 
         using var border = new Pen(Color.FromArgb(147, 96, 55));
-        graphics.DrawRectangle(border, frame - 1, frame - 1, width - frame * 2 + 1, height - frame * 2 + 1);
+        graphics.DrawRectangle(border, frame - 1, topFrame - 1, width - frame * 2 + 1, height - frame - topFrame + 1);
         graphics.DrawRectangle(border, 0, 0, width - 1, height - 1);
-        graphics.DrawLine(border, 0, 0, frame, frame);
-        graphics.DrawLine(border, width - 1, 0, width - frame, frame);
+        graphics.DrawLine(border, 0, 0, frame, topFrame);
+        graphics.DrawLine(border, width - 1, 0, width - frame, topFrame);
         graphics.DrawLine(border, width - 1, height - 1, width - frame, height - frame);
         graphics.DrawLine(border, 0, height - 1, frame, height - frame);
 

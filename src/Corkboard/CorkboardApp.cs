@@ -1,25 +1,33 @@
+using System.Runtime.InteropServices;
+
 namespace Corkboard;
 
 internal sealed class CorkboardApp : ApplicationContext
 {
+    internal const string BoardShortcut = "Ctrl+Alt+B";
     private readonly NoteStore store;
     private readonly BoardData data;
     private readonly Dictionary<Guid, BoardWindow> openBoards = [];
-    private readonly Control dispatcher = new();
+    private readonly ShortcutDispatcher dispatcher;
     private readonly CorkMenu trayMenu = new();
     private readonly TrayIcon tray;
     private readonly System.Windows.Forms.Timer autosave = new() { Interval = 480 };
+    private readonly System.Windows.Forms.Timer checklistTimer = new();
     private bool dirty;
     private readonly List<Guid> minimizedBoards = [];
+    private Guid? shortcutHiddenBoard;
 
     public CorkboardApp(NoteStore store, BoardData data, string? warning)
     {
         this.store = store;
         this.data = data;
+        dispatcher = new ShortcutDispatcher(ToggleBoardShortcut);
         _ = dispatcher.Handle;
         tray = new TrayIcon(Icon, trayMenu, ReopenBoard, RestoreHiddenBoards);
         trayMenu.Opening += (_, _) => BuildTrayMenu();
         autosave.Tick += (_, _) => Save();
+        checklistTimer.Tick += (_, _) => RunChecklistResets(DateTime.Now);
+        RunChecklistResets(DateTime.Now);
 
         Guid? preferred = data.LastBoard;
         CorkBoard[] previous = data.Boards.Where(board => board.WasOpen).ToArray();
@@ -28,6 +36,8 @@ internal sealed class CorkboardApp : ApplicationContext
         else if (previous.FirstOrDefault(board => board.Id == preferred) is CorkBoard last) Open(last);
         tray.EnsureRegistered();
         if (warning != null) foreach (BoardWindow window in openBoards.Values) window.ShowNotice(warning);
+        else if (!dispatcher.Registered && data.LastBoard is Guid lastBoard && openBoards.TryGetValue(lastBoard, out BoardWindow? active))
+            active.ShowNotice($"{BoardShortcut} is unavailable. You can still use the tray icon.");
     }
 
     public Icon Icon { get; } = Icon.ExtractAssociatedIcon(Environment.ProcessPath!) ?? (Icon)SystemIcons.Application.Clone();
@@ -39,6 +49,7 @@ internal sealed class CorkboardApp : ApplicationContext
 
     public BoardWindow Open(CorkBoard board)
     {
+        if (shortcutHiddenBoard == board.Id) shortcutHiddenBoard = null;
         minimizedBoards.Remove(board.Id);
         if (!openBoards.TryGetValue(board.Id, out BoardWindow? window))
         {
@@ -92,8 +103,9 @@ internal sealed class CorkboardApp : ApplicationContext
     {
         string name = string.IsNullOrWhiteSpace(note.Label) ? note.Text.Split(['\r', '\n'], 2)[0].Trim() : note.Label;
         if (name.Length > 52) name = name[..51] + "…";
-        string target = name.Length == 0 ? "this untitled note" : $"“{name}”";
-        if (CorkDialog.Confirm(owner, "Delete note", $"Delete {target} from “{board.Name}”?", "Delete note")) CommitNoteDeletion(board, note);
+        string kind = note.Table is null ? "note" : "table";
+        string target = name.Length == 0 ? $"this untitled {kind}" : $"“{name}”";
+        if (CorkDialog.Confirm(owner, $"Delete {kind}", $"Delete {target} from “{board.Name}”?", $"Delete {kind}")) CommitNoteDeletion(board, note);
     }
 
     private void CommitBoardDeletion(CorkBoard board)
@@ -161,6 +173,53 @@ internal sealed class CorkboardApp : ApplicationContext
         autosave.Start();
     }
 
+    public void SetChecklistReset(StickyNote note, TimeOnly? time)
+    {
+        if (note.DailyChecklistReset == time) return;
+        DateTime now = DateTime.Now;
+        note.DailyChecklistReset = time;
+        note.LastChecklistReset = time is TimeOnly reset ? LatestResetDate(now, reset) : null;
+        RunChecklistResets(now);
+        MarkDirty();
+    }
+
+    private static DateOnly LatestResetDate(DateTime now, TimeOnly time)
+    {
+        DateOnly today = DateOnly.FromDateTime(now);
+        return TimeOnly.FromDateTime(now) >= time ? today : today.AddDays(-1);
+    }
+
+    private void RunChecklistResets(DateTime now)
+    {
+        checklistTimer.Stop();
+        DateTime? nextReset = null;
+        foreach (CorkBoard board in data.Boards)
+        {
+            foreach (StickyNote note in board.Notes)
+            {
+                if (note.DailyChecklistReset is not TimeOnly time) continue;
+                DateOnly due = LatestResetDate(now, time);
+                if (note.LastChecklistReset is null || note.LastChecklistReset < due)
+                {
+                    bool changed = NoteCard.ResetCheckedItems(note);
+                    note.LastChecklistReset = due;
+                    if (changed && openBoards.TryGetValue(board.Id, out BoardWindow? window))
+                        window.RefreshNoteText(note);
+                    MarkDirty();
+                }
+
+                DateTime next = due.AddDays(1).ToDateTime(time);
+                if (nextReset is null || next < nextReset) nextReset = next;
+            }
+        }
+        if (nextReset is DateTime scheduled)
+        {
+            // Recheck the local clock after sleep or a clock change.
+            checklistTimer.Interval = (int)Math.Clamp(Math.Ceiling((scheduled - now).TotalMilliseconds), 1, 60_000);
+            checklistTimer.Start();
+        }
+    }
+
     public bool Save()
     {
         autosave.Stop();
@@ -180,9 +239,15 @@ internal sealed class CorkboardApp : ApplicationContext
 
     public void Exit()
     {
+        foreach (BoardWindow board in openBoards.Values)
+        {
+            board.CommitTableEdits();
+            board.RememberBounds();
+        }
         if (!Save() && MessageBox.Show("Corkboard couldn’t save the latest changes. Exit anyway?", "Corkboard",
             MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
         Exiting = true;
+        checklistTimer.Stop();
         foreach (BoardWindow board in openBoards.Values.ToArray()) board.Close();
         tray.Dispose();
         ExitThread();
@@ -196,6 +261,7 @@ internal sealed class CorkboardApp : ApplicationContext
             tray.Dispose();
             trayMenu.Dispose();
             autosave.Dispose();
+            checklistTimer.Dispose();
             dispatcher.Dispose();
             Icon.Dispose();
         }
@@ -209,6 +275,29 @@ internal sealed class CorkboardApp : ApplicationContext
         Open(data.Boards.FirstOrDefault(board => board.Id == preferred) ?? data.Boards[0]);
     }
 
+    private void ToggleBoardShortcut()
+    {
+        if (Exiting || Application.OpenForms.OfType<Form>().Any(form => form.Modal)) return;
+
+        Guid? id = shortcutHiddenBoard ?? data.LastBoard;
+        CorkBoard? board = data.Boards.Find(candidate => candidate.Id == id);
+        if (board is null || !openBoards.TryGetValue(board.Id, out BoardWindow? window))
+        {
+            ReopenBoard();
+            return;
+        }
+
+        if (!window.Visible || window.WindowState == FormWindowState.Minimized)
+        {
+            Open(board);
+            return;
+        }
+
+        if (!ShortcutDispatcher.IsWindowEnabled(window.Handle)) return;
+        shortcutHiddenBoard = board.Id;
+        window.MinimizeBoard();
+    }
+
     private void SetLastBoard(Guid id)
     {
         if (data.LastBoard == id) return;
@@ -220,6 +309,7 @@ internal sealed class CorkboardApp : ApplicationContext
     {
         openBoards.Remove(board.Id);
         minimizedBoards.Remove(board.Id);
+        if (shortcutHiddenBoard == board.Id) shortcutHiddenBoard = null;
         if (Exiting || !data.Boards.Contains(board)) return;
         board.WasOpen = false;
         MarkDirty();
@@ -246,8 +336,11 @@ internal sealed class CorkboardApp : ApplicationContext
     private void BuildTrayMenu()
     {
         foreach (ToolStripItem item in trayMenu.Items.Cast<ToolStripItem>().ToArray()) item.Dispose();
-        trayMenu.Items.Add("Open Corkboard", null, (_, _) => ReopenBoard());
-        var boards = new TrayBoardsItem();
+        trayMenu.Items.Add(new ToolStripMenuItem("Open Corkboard", null, (_, _) => ReopenBoard())
+        {
+            ShortcutKeyDisplayString = dispatcher.Registered ? BoardShortcut : ""
+        });
+        var boards = new CorkSubmenuItem("Corkboards");
         foreach (CorkBoard board in data.Boards)
         {
             var item = new ToolStripMenuItem(board.Name, null, (_, _) => Open(board)) { Checked = openBoards.ContainsKey(board.Id) };
@@ -258,28 +351,49 @@ internal sealed class CorkboardApp : ApplicationContext
         trayMenu.Items.Add("Exit Corkboard", null, (_, _) => Exit());
     }
 
-    private sealed class TrayBoardsItem() : ToolStripMenuItem("Corkboards")
+    private sealed class ShortcutDispatcher(Action toggle) : Control
     {
-        protected override Point DropDownLocation
-        {
-            get
-            {
-                if (GetCurrentParent() is not ToolStrip parent) return base.DropDownLocation;
+        private const int ShortcutId = 1;
+        private const int HotkeyMessage = 0x0312;
+        private const uint ModAlt = 0x0001;
+        private const uint ModControl = 0x0002;
+        private const uint ModNoRepeat = 0x4000;
+        public bool Registered { get; private set; }
 
-                Rectangle menu = parent.RectangleToScreen(parent.ClientRectangle);
-                Rectangle workArea = Screen.FromRectangle(menu).WorkingArea;
-                Size size = DropDown.GetPreferredSize(Size.Empty);
-                int overlap = parent.LogicalToDeviceUnits(1);
-                int right = menu.Right - overlap;
-                int left = menu.Left + overlap;
-                int roomRight = workArea.Right - right;
-                int roomLeft = left - workArea.Left;
-                bool openRight = roomRight >= size.Width || roomRight >= roomLeft;
-                int x = openRight ? right : left - size.Width;
-                return new Point(
-                    Math.Clamp(x, workArea.Left, Math.Max(workArea.Left, workArea.Right - size.Width)),
-                    Math.Clamp(menu.Top + Bounds.Top, workArea.Top, Math.Max(workArea.Top, workArea.Bottom - size.Height)));
-            }
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            Registered = RegisterHotKey(Handle, ShortcutId, ModAlt | ModControl | ModNoRepeat, (uint)Keys.B);
         }
+
+        protected override void OnHandleDestroyed(EventArgs e)
+        {
+            if (Registered) UnregisterHotKey(Handle, ShortcutId);
+            Registered = false;
+            base.OnHandleDestroyed(e);
+        }
+
+        protected override void WndProc(ref Message message)
+        {
+            if (message.Msg == HotkeyMessage && message.WParam == new IntPtr(ShortcutId))
+            {
+                toggle();
+                return;
+            }
+            base.WndProc(ref message);
+        }
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool RegisterHotKey(IntPtr window, int id, uint modifiers, uint key);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool UnregisterHotKey(IntPtr window, int id);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool IsWindowEnabled(IntPtr window);
     }
+
 }
