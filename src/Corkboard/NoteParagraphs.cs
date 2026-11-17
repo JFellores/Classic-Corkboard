@@ -7,14 +7,17 @@ internal static class NoteParagraphs
     private const ushort Bullets = 1, Numbers = 2;
     private const uint GetParagraphFormat = 0x043D, SetParagraphFormat = 0x0447;
     private const uint NumberingMask = 0xE020, StartIndentMask = 0x0001;
+    private const ushort StartNewNumbering = 0x8000;
+    private const uint NumberingStartStyleMask = 0xA000;
     private const uint NumberingTabMask = 0x4000;
     private const int CompactIndent = 180, StandardIndent = 300;
+    private const int NestIndent = 360, MaximumNest = 6;
     private const ushort CompactTab = 120, StandardTab = 180;
     private const string Dash = "– ";
     internal const char DividerMarker = '\u2063';
     private const string DividerMarkers = "\u2063\u2062\u2064\u2061";
 
-    public static void CycleList(RichTextBox editor)
+    public static bool CycleList(RichTextBox editor)
     {
         string text = editor.Text;
         int start = editor.SelectionStart;
@@ -28,19 +31,20 @@ internal static class NoteParagraphs
             editor.Select(line, 0);
             ParagraphFormat format = ReadFormat(editor);
             if (DividerStyle(text.AsSpan(line, LineEnd(text, line) - line)) > 0) continue;
+            if (NoteCard.FindChecklistMarker(text, line) >= 0) continue;
             int style = format.Numbering switch
             {
                 Bullets => 1,
                 Numbers => 2,
                 _ => HasDash(text, line) ? 3 : 0
             };
-            if (lines.Count == 0 && style is 1 or 2) standard = format.StartIndent >= StandardIndent;
+            if (lines.Count == 0 && style is 1 or 2) standard = BaseIndent(format) == StandardIndent;
             lines.Add((line, style));
         }
         if (lines.Count == 0)
         {
             editor.Select(start, end - start);
-            return;
+            return false;
         }
         int next = lines.All(line => line.Style == lines[0].Style) ? (lines[0].Style + 1) % 4 : 1;
         for (int index = lines.Count - 1; index >= 0; index--)
@@ -60,19 +64,28 @@ internal static class NoteParagraphs
         }
         if (next is 1 or 2 || lines.Any(line => line.Style is 1 or 2))
         {
-            editor.Select(first, Math.Max(0, LineEnd(editor.Text, Math.Max(first, end - 1)) - first));
-            var format = new ParagraphFormat
+            int lastLine = LineEnd(editor.Text, Math.Max(first, end - 1));
+            string updated = editor.Text;
+            for (int line = first; line <= lastLine; line = LineEnd(updated, line) + 1)
             {
-                Mask = NumberingMask | StartIndentMask,
-                Numbering = next == 1 ? Bullets : next == 2 ? Numbers : (ushort)0,
-                StartIndent = next is 1 or 2 ? (standard ? StandardIndent : CompactIndent) : 0,
-                NumberingStart = 1,
-                NumberingStyle = 0x0200,
-                NumberingTab = standard ? StandardTab : CompactTab
-            };
-            SendParagraphFormat(editor.Handle, SetParagraphFormat, IntPtr.Zero, format);
+                if (NoteCard.FindChecklistMarker(updated, line) >= 0 || DividerStyle(updated.AsSpan(line, LineEnd(updated, line) - line)) > 0) continue;
+                editor.Select(line, 0);
+                ParagraphFormat old = ReadFormat(editor);
+                int nesting = Math.Max(0, old.StartIndent - BaseIndent(old));
+                var format = new ParagraphFormat
+                {
+                    Mask = NumberingMask | StartIndentMask,
+                    Numbering = next == 1 ? Bullets : next == 2 ? Numbers : (ushort)0,
+                    StartIndent = nesting + (next is 1 or 2 ? (standard ? StandardIndent : CompactIndent) : 0),
+                    NumberingStart = 1,
+                    NumberingStyle = 0x0200,
+                    NumberingTab = standard ? StandardTab : CompactTab
+                };
+                SendParagraphFormat(editor.Handle, SetParagraphFormat, IntPtr.Zero, format);
+            }
         }
         editor.Select(start, end - start);
+        return next != 0;
     }
 
     public static void SetListIndent(RichTextBox editor, bool compact)
@@ -81,17 +94,13 @@ internal static class NoteParagraphs
         int start = editor.SelectionStart;
         int length = editor.SelectionLength;
         int last = LineEnd(text, Math.Max(start, start + length - 1));
-        var indent = new ParagraphFormat
-        {
-            Mask = StartIndentMask | NumberingTabMask,
-            StartIndent = compact ? CompactIndent : StandardIndent,
-            NumberingTab = compact ? CompactTab : StandardTab
-        };
         for (int line = LineStart(text, start); line <= last; line = LineEnd(text, line) + 1)
         {
             editor.Select(line, 0);
-            if (ReadFormat(editor).Numbering is Bullets or Numbers)
-                SendParagraphFormat(editor.Handle, SetParagraphFormat, IntPtr.Zero, indent);
+            ParagraphFormat current = ReadFormat(editor);
+            if (current.Numbering is Bullets or Numbers)
+                ApplyIndent(editor, current.StartIndent - BaseIndent(current) + (compact ? CompactIndent : StandardIndent),
+                    compact ? CompactTab : StandardTab);
         }
         editor.Select(start, length);
     }
@@ -109,6 +118,7 @@ internal static class NoteParagraphs
             int end = LineEnd(text, line);
             ReadOnlySpan<char> contents = text.AsSpan(line, end - line);
             if (DividerStyle(contents) > 0) continue;
+            if (NoteCard.FindChecklistMarker(text, line) >= 0) continue;
             int prefix = FreeFormPrefixLength(contents);
             lines.Add((line, prefix));
         }
@@ -133,7 +143,7 @@ internal static class NoteParagraphs
         }
     }
 
-    private static int FreeFormPrefixLength(ReadOnlySpan<char> line)
+    internal static int FreeFormPrefixLength(ReadOnlySpan<char> line)
     {
         if (line.StartsWith("• ") || line.StartsWith("- ") || line.StartsWith(Dash)) return 2;
         int digits = 0;
@@ -141,11 +151,141 @@ internal static class NoteParagraphs
         return digits > 0 && line[digits..].StartsWith(". ") ? digits + 2 : 0;
     }
 
+    internal static (int Kind, int Indent, int Start, bool Restart) LayoutNumbering(RichTextBox editor, int position)
+    {
+        editor.Select(position, 0);
+        ParagraphFormat format = ReadFormat(editor);
+        return (format.Numbering, format.StartIndent, Math.Max(1, (int)format.NumberingStart),
+            (format.NumberingStyle & StartNewNumbering) != 0);
+    }
+
+    internal static void ContinueLayoutNumbering(RichTextBox editor, int position, int number)
+    {
+        editor.Select(position, 0);
+        ParagraphFormat format = ReadFormat(editor);
+        format.Mask = NumberingStartStyleMask;
+        format.NumberingStart = (ushort)Math.Min(number, ushort.MaxValue);
+        format.NumberingStyle |= StartNewNumbering;
+        SendParagraphFormat(editor.Handle, SetParagraphFormat, IntPtr.Zero, format);
+    }
+
+    internal static void ClearLayoutNumbering(RichTextBox editor, int position)
+    {
+        editor.Select(position, 0);
+        ApplyIndent(editor, 0, clearMarker: true);
+    }
+
     private static ParagraphFormat ReadFormat(RichTextBox editor)
     {
         var format = new ParagraphFormat();
         SendParagraphFormat(editor.Handle, GetParagraphFormat, IntPtr.Zero, format);
         return format;
+    }
+
+    private static int BaseIndent(ParagraphFormat format) => format.Numbering is Bullets or Numbers
+        ? (format.NumberingTab >= StandardTab ? StandardIndent : CompactIndent) : 0;
+
+    private static void ApplyIndent(RichTextBox editor, int indent, ushort? tab = null, bool clearMarker = false)
+    {
+        var format = new ParagraphFormat
+        {
+            Mask = StartIndentMask | (tab.HasValue ? NumberingTabMask : 0) | (clearMarker ? NumberingMask : 0),
+            StartIndent = Math.Max(0, indent),
+            NumberingTab = tab ?? 0
+        };
+        SendParagraphFormat(editor.Handle, SetParagraphFormat, IntPtr.Zero, format);
+    }
+
+    internal static void ClearListMarker(RichTextBox editor, int line)
+    {
+        editor.Select(line, 0);
+        ParagraphFormat format = ReadFormat(editor);
+        if (format.Numbering is Bullets or Numbers)
+            ApplyIndent(editor, format.StartIndent - BaseIndent(format), clearMarker: true);
+    }
+
+    internal static bool RepairChecklistMarkers(RichTextBox editor)
+    {
+        string text = editor.Text;
+        bool changed = false;
+        for (int line = 0; line < text.Length;)
+        {
+            int end = LineEnd(text, line);
+            ReadOnlySpan<char> content = text.AsSpan(line, end - line);
+            int prefix = 0;
+            while (prefix < content.Length && content[prefix] is ' ' or '\t') prefix++;
+            int listPrefix = FreeFormPrefixLength(content[prefix..]);
+            int marker = line + prefix + listPrefix;
+            if (marker < end && NoteCard.IsChecklistItem(text, marker))
+            {
+                editor.Select(line, 0);
+                ParagraphFormat format = ReadFormat(editor);
+                if (listPrefix > 0 || format.Numbering is Bullets or Numbers)
+                {
+                    // A formerly bulleted checkbox keeps its visual level when the extra marker is removed.
+                    int indent = format.StartIndent + (prefix > 0 && listPrefix > 0 ? NestIndent : 0);
+                    if (listPrefix > 0)
+                    {
+                        editor.Select(line, prefix + listPrefix);
+                        editor.SelectedText = "";
+                        end -= prefix + listPrefix;
+                        text = editor.Text;
+                    }
+                    editor.Select(line, 0);
+                    ApplyIndent(editor, indent, clearMarker: true);
+                    changed = true;
+                }
+            }
+            line = end + 1;
+        }
+        return changed;
+    }
+
+    internal static bool AdjustListLevel(RichTextBox editor, int direction)
+    {
+        string text = editor.Text;
+        int start = editor.SelectionStart, length = editor.SelectionLength;
+        int last = LineEnd(text, Math.Max(start, start + length - 1));
+        bool handled = false;
+        for (int line = LineStart(text, start); line <= last; line = LineEnd(text, line) + 1)
+        {
+            editor.Select(line, 0);
+            ParagraphFormat format = ReadFormat(editor);
+            bool checklist = NoteCard.FindChecklistMarker(text, line) >= 0;
+            bool numbered = format.Numbering is Bullets or Numbers;
+            if (!checklist && !numbered && FreeFormPrefixLength(text.AsSpan(line, LineEnd(text, line) - line)) == 0) continue;
+            int baseIndent = BaseIndent(format);
+            int level = Math.Clamp(format.StartIndent - baseIndent + direction * NestIndent, 0, MaximumNest * NestIndent);
+            ApplyIndent(editor, level + (checklist ? 0 : baseIndent), clearMarker: checklist && numbered);
+            handled = true;
+        }
+        editor.Select(start, length);
+        return handled;
+    }
+
+    internal static bool ContinueChecklist(RichTextBox editor)
+    {
+        if (editor.SelectionLength != 0) return false;
+        string text = editor.Text;
+        int caret = editor.SelectionStart;
+        int line = LineStart(text, caret);
+        int marker = NoteCard.FindChecklistMarker(text, line);
+        if (marker < 0 || caret <= marker) return false;
+        int end = LineEnd(text, caret);
+        ClearListMarker(editor, line);
+        if (text.AsSpan(marker + 1, end - marker - 1).IsWhiteSpace())
+        {
+            editor.Select(line, end - line);
+            editor.SelectedText = "";
+            ApplyIndent(editor, 0);
+        }
+        else
+        {
+            editor.Select(caret, 0);
+            bool bold = editor.SelectionFont?.Bold == true;
+            NoteLinks.InsertPlainText(editor, "\n" + text[line..marker] + "☐ ", bold: bold);
+        }
+        return true;
     }
 
     public static bool HandleDashEnter(RichTextBox editor)
@@ -208,7 +348,7 @@ internal static class NoteParagraphs
     internal static char StyledDividerMarker(int flags) => DividerMarkers[flags];
 
     internal static string RemoveDividerMarkers(string text) =>
-        text.Replace("\u2063", "").Replace("\u2062", "").Replace("\u2064", "").Replace("\u2061", "");
+        NoteListLayout.VisibleText(text).Replace("\u2063", "").Replace("\u2062", "").Replace("\u2064", "").Replace("\u2061", "");
 
     private static bool HasDash(string text, int start) => text.AsSpan(start).StartsWith(Dash, StringComparison.Ordinal);
     private static int LineStart(string text, int position) => position == 0 ? 0 : text.LastIndexOf('\n', position - 1) + 1;

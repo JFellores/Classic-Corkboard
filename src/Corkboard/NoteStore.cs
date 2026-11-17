@@ -9,7 +9,13 @@ internal sealed class BoardData
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public List<StickyNote>? LegacyNotes { get; set; }
     public List<CorkBoard> Boards { get; init; } = [];
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public DeletedItem[]? DeletedItems { get; set; }
     public Guid? LastBoard { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public List<NoteReminder>? Reminders { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public ReminderSoundSettings? ReminderSound { get; set; }
 
     public void Upgrade()
     {
@@ -93,12 +99,26 @@ internal sealed class StickyNote
     public Guid Id { get; init; } = Guid.NewGuid();
     public string Text { get; set; } = "";
     public string? FormattedText { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public Guid? CheckedItemDestination { get; set; }
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingDefault)]
     public NoteTimestampFormat TimestampFormat { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingDefault)]
+    public bool SubtleTimestamps { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingDefault)]
+    public bool UsePages { get; set; }
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public TimeOnly? DailyChecklistReset { get; set; }
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public DateOnly? LastChecklistReset { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public int? ChecklistResetDelayMinutes { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public ChecklistItemRule[]? ChecklistItems { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public Dictionary<NoteRules.Trigger, NoteRules.Settings>? ContentRules { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public TextSelectionRule[]? TextSelectionRules { get; set; }
     public string Label { get; set; } = "";
     public string? ImageFile { get; set; }
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
@@ -135,8 +155,9 @@ internal sealed class NoteThread
 
 internal sealed class NoteStore(string folder)
 {
+    public string ReminderSoundFolder => Path.Combine(folder, "reminder-sounds");
     public ImageLibrary Images { get; } = new(Path.Combine(folder, "images"));
-    private static readonly JsonSerializerOptions JsonOptions = new()
+    internal static readonly JsonSerializerOptions JsonOptions = new()
     {
         WriteIndented = true,
         Converters = { new BoundsConverter() }
@@ -224,16 +245,20 @@ internal static class Startup
     private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string Entry = "Corkboard";
 
-    public static bool IsEnabled()
+    public static bool IsEnabled() => string.Equals(ReadCommand(), Command, StringComparison.OrdinalIgnoreCase);
+
+    public static string? ReadCommand()
     {
         using RegistryKey? key = Registry.CurrentUser.OpenSubKey(RunKey);
-        return string.Equals(key?.GetValue(Entry) as string, Command, StringComparison.OrdinalIgnoreCase);
+        return key?.GetValue(Entry) as string;
     }
 
-    public static void SetEnabled(bool enabled)
+    public static void SetEnabled(bool enabled) => WriteCommand(enabled ? Command : null);
+
+    public static void WriteCommand(string? value)
     {
         using RegistryKey key = Registry.CurrentUser.CreateSubKey(RunKey);
-        if (enabled) key.SetValue(Entry, Command);
+        if (value is not null) key.SetValue(Entry, value);
         else key.DeleteValue(Entry, throwOnMissingValue: false);
     }
 

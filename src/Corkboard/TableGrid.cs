@@ -6,6 +6,7 @@ internal sealed class TableGrid : UserControl
 {
     private readonly TableData table;
     private readonly Action changed;
+    private readonly Func<IDisposable> beginEdit;
     private readonly CellGrid grid;
     private readonly Button addRow;
     private readonly Button deleteRow;
@@ -24,10 +25,11 @@ internal sealed class TableGrid : UserControl
     private int referenceStart;
     private int referenceLength;
 
-    public TableGrid(TableData table, Action changed)
+    public TableGrid(TableData table, Action changed, Func<IDisposable> beginEdit)
     {
         this.table = table;
         this.changed = changed;
+        this.beginEdit = beginEdit;
         AccessibleName = "Table card controls";
         Dock = DockStyle.Fill;
 
@@ -77,6 +79,7 @@ internal sealed class TableGrid : UserControl
             SelectRange(new Rectangle(e.ColumnIndex, 0, 1, table.Rows.Count), moveCurrent: true);
         grid.MouseDown += StartSelectionDrag;
         grid.MouseMove += ContinueSelectionDrag;
+        grid.MouseMove += (_, e) => UpdateGridCursor(e.Location);
         grid.MouseUp += (_, e) =>
         {
             if (e.Button == MouseButtons.Left && dragAnchor is Point start && dragEnd is Point end)
@@ -279,6 +282,7 @@ internal sealed class TableGrid : UserControl
         if (refreshing || e.RowIndex < 0 || e.ColumnIndex < 0) return;
         string raw = grid[e.ColumnIndex, e.RowIndex].Value as string ?? "";
         if (table.Rows[e.RowIndex][e.ColumnIndex] == raw) return;
+        using var edit = beginEdit();
         table.Rows[e.RowIndex][e.ColumnIndex] = raw;
         display = table.Calculate();
         grid.Invalidate();
@@ -319,6 +323,28 @@ internal sealed class TableGrid : UserControl
         return area.Width == 1 && area.Height == 1 ? first : $"{first}:{(char)('A' + area.Right - 1)}{area.Bottom}";
     }
 
+    private bool CanPickReference(TextBox input)
+    {
+        if (!input.Text.TrimStart().StartsWith('=')) return false;
+        if (pickedFormula == input.Text && input.SelectionStart == referenceStart + referenceLength && input.SelectionLength == 0)
+            return true;
+        string before = input.Text[..input.SelectionStart].TrimEnd();
+        return before.EndsWith('=') || before.EndsWith('(');
+    }
+
+    private void UpdateGridCursor(Point location)
+    {
+        var hit = grid.HitTest(location.X, location.Y);
+        Cursor cursor = Cursors.Default;
+        if (hit.Type is DataGridViewHitTestType.RowHeader or DataGridViewHitTestType.ColumnHeader)
+            cursor = Cursors.Hand;
+        else if (hit.Type == DataGridViewHitTestType.Cell && grid.EditingControl is TextBox input
+            && grid.CurrentCell is { } current && (hit.ColumnIndex != current.ColumnIndex || hit.RowIndex != current.RowIndex)
+            && CanPickReference(input))
+            cursor = Cursors.Cross;
+        if (grid.Cursor != cursor) grid.Cursor = cursor;
+    }
+
     private bool HandleReferencePointer(ReferencePointer action, Point location)
     {
         if (action == ReferencePointer.Up && referenceAnchor is not null)
@@ -334,11 +360,9 @@ internal sealed class TableGrid : UserControl
         if (action == ReferencePointer.Down)
         {
             if (hit.Type != DataGridViewHitTestType.Cell || (hit.ColumnIndex == current.ColumnIndex && hit.RowIndex == current.RowIndex)
-                || !input.Text.TrimStart().StartsWith('=')) return false;
+                || !CanPickReference(input)) return false;
             if (pickedFormula != input.Text || input.SelectionStart != referenceStart + referenceLength || input.SelectionLength != 0)
             {
-                string before = input.Text[..input.SelectionStart].TrimEnd();
-                if (!before.EndsWith('=') && !before.EndsWith('(')) return false;
                 referenceStart = input.SelectionStart;
                 referenceLength = input.SelectionLength;
             }
@@ -431,6 +455,7 @@ internal sealed class TableGrid : UserControl
         if (!grid.EndEdit()) return;
         DataGridViewCell[] populated = SelectedCells().Where(cell => table.Rows[cell.RowIndex][cell.ColumnIndex].Length > 0).ToArray();
         if (populated.Length == 0) return;
+        using var edit = beginEdit();
         foreach (DataGridViewCell cell in populated) table.Rows[cell.RowIndex][cell.ColumnIndex] = "";
         Reload();
         changed();
@@ -457,6 +482,7 @@ internal sealed class TableGrid : UserControl
 
         DataGridViewCell[] selection = SelectedCells();
         Rectangle start = selection.Length > 0 ? SelectionBounds(selection) : new Rectangle(current.ColumnIndex, current.RowIndex, 1, 1);
+        using var edit = beginEdit();
         if (values.Length == 1 && values[0].Length == 1 && selection.Length > 1)
         {
             foreach (DataGridViewCell cell in selection) Put(cell.RowIndex, cell.ColumnIndex, values[0][0]);
@@ -493,6 +519,7 @@ internal sealed class TableGrid : UserControl
     private void Append(bool column)
     {
         if (!table.CanAdd(column) || !grid.EndEdit()) return;
+        using var edit = beginEdit();
         int row = grid.CurrentCell?.RowIndex ?? 0;
         int cell = grid.CurrentCell?.ColumnIndex ?? 0;
         table.Append(column);
@@ -515,6 +542,7 @@ internal sealed class TableGrid : UserControl
             : $"{indices.Length} {kind}s";
         if (indices.Any(index => table.HasValues(column, index))
             && !CorkDialog.Confirm(FindForm()!, "Delete " + target, $"Delete {target} and its contents?", "Delete")) return;
+        using var edit = beginEdit();
         foreach (int index in indices.Reverse()) table.Remove(column, index);
         Reload();
         SelectRange(new Rectangle(Math.Min(column ? indices[0] : col, table.ColumnCount - 1),

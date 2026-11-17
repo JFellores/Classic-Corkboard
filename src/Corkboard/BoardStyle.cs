@@ -35,6 +35,26 @@ internal static class BoardStyle
         ("Linen", Color.FromArgb(255, 247, 229), Color.FromArgb(230, 215, 183))
     ];
 
+    internal static readonly (string Name, Color Color)[] TextColors =
+    [
+        ("Black", BoardStyle.Ink), ("Red", Color.FromArgb(163, 39, 51)), ("Blue", Color.FromArgb(48, 71, 174)),
+        ("Green", Color.FromArgb(27, 105, 60)), ("Purple", Color.FromArgb(120, 57, 142))
+    ];
+
+    internal static void PaintColorSwatch(object? sender, PaintEventArgs e)
+    {
+        if (sender is not RadioButton swatch) return;
+        int size = swatch.LogicalToDeviceUnits(13);
+        var dot = new Rectangle((swatch.Width - size) / 2, (swatch.Height - size) / 2, size, size);
+        e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+        using var fill = new SolidBrush(swatch.ForeColor);
+        e.Graphics.FillEllipse(fill, dot);
+        if (!swatch.Checked) return;
+        int gap = swatch.LogicalToDeviceUnits(2);
+        using var outline = new Pen(swatch.ForeColor, swatch.LogicalToDeviceUnits(1));
+        e.Graphics.DrawEllipse(outline, Rectangle.Inflate(dot, gap, gap));
+    }
+
     public static Button Button(string text, Color fill, Color ink, bool compactText = false)
     {
         var button = new CommandButton(compactText)

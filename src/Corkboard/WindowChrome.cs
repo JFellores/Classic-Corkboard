@@ -34,6 +34,13 @@ internal class ResizableWindow : Form
             message.Result = IntPtr.Zero;
             return;
         }
+        const int SetCursor = 0x0020, Caption = 2;
+        if (message.Msg == SetCursor && message.WParam == Handle && (short)message.LParam.ToInt64() == Caption)
+        {
+            Cursor.Current = Cursors.SizeAll;
+            message.Result = new IntPtr(1);
+            return;
+        }
         base.WndProc(ref message);
         if (message.Msg != 0x0084 || message.Result != new IntPtr(1)) return;
 

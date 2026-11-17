@@ -14,12 +14,15 @@ internal sealed class NoteCard : UserControl
     private static readonly Size MinimumTableSize = new(252, 192);
     private const char UncheckedItem = '☐';
     private const char CheckedItem = '☑';
-    private const uint Strikeout = 8;
+    internal const uint Bold = 1, Strikeout = 8;
     private const uint FontSizeMask = 0x80000000;
+    private const uint FontFaceMask = 0x20000000;
     private const int MaximumTextSize = 24;
     private readonly BoardWindow board;
     private readonly StickyNote note;
     private readonly RichTextBox? editor;
+    private readonly NotePages? pages;
+    private readonly NoteScrollBar? noteScrollBar;
     private readonly TableGrid? tableGrid;
     private readonly Button label;
     private readonly Button options;
@@ -39,6 +42,7 @@ internal sealed class NoteCard : UserControl
     private readonly CorkMenu pinMenu = new();
     private readonly CorkMenu? colorMenu;
     private readonly CorkMenu? formattingMenu;
+    private readonly CorkMenu? textMenu;
     private readonly ToolTip tips = new();
     private Control? dragHandle;
     private Point dragStart;
@@ -84,27 +88,28 @@ internal sealed class NoteCard : UserControl
         else if (note.Table is TableData table)
         {
             writingArea.Padding = new Padding(9, 6, 9, floating ? 8 : 0);
-            tableGrid = new TableGrid(table, () => board.ChangeTable(note, this));
+            tableGrid = new TableGrid(table, () => board.ChangeTable(note, this), () => board.EditNote(note, "edit table"));
             writingArea.Controls.Add(tableGrid);
         }
         else
         {
             editor = new NoteTextEditor
             {
-                Multiline = true, AcceptsTab = false, ScrollBars = RichTextBoxScrollBars.Vertical, DetectUrls = false,
+                Multiline = true, AcceptsTab = false, ScrollBars = RichTextBoxScrollBars.None, DetectUrls = false,
                 Dock = DockStyle.Fill, BorderStyle = BorderStyle.None, ForeColor = BoardStyle.Ink,
-                AccessibleName = "Note text", Margin = Padding.Empty, HideSelection = false
+                AccessibleName = "Note text", Margin = Padding.Empty, HideSelection = false,
+                IsOverChecklist = point => ChecklistMarkerAt(point) >= 0
             };
-            editor.TextChanged += (_, _) => PublishEdit();
+            editor.TextChanged += (_, _) => PublishEdit(runTextRules: true);
             editor.SelectionChanged += (_, _) => RefreshFormattingButtons();
             editor.LinkClicked += (_, e) => OpenLink(e.LinkText);
             editor.MouseClick += ClickChecklistItem;
-            editor.MouseMove += (_, e) =>
-            {
-                if (ChecklistMarkerAt(e.Location) >= 0) editor.Cursor = Cursors.Hand;
-                else if (editor.Cursor == Cursors.Hand) editor.ResetCursor();
-            };
+            textMenu = BuildTextMenu(editor);
+            editor.ContextMenuStrip = textMenu;
             writingArea.Controls.Add(editor);
+            pages = new NotePages((NoteTextEditor)editor, writingArea);
+            noteScrollBar = new NoteScrollBar((NoteTextEditor)editor);
+            writingArea.Controls.Add(noteScrollBar);
         }
 
         header = new Panel { Dock = DockStyle.Top, Height = isImage ? (floating ? 11 : 25) : 32 };
@@ -250,7 +255,7 @@ internal sealed class NoteCard : UserControl
                 foreach (Button button in formatButtons.Where(button => !button.Visible))
                 {
                     if (button == checklist) formattingMenu.Items.Add("Checklist", null, (_, _) => AddChecklistItems());
-                    else if (button == textSize) formattingMenu.Items.Add("Text size…", null, (_, _) => EditTextSize());
+                    else if (button == textSize) formattingMenu.Items.Add("Text appearance…", null, (_, _) => EditTextSize());
                     else if (button == link) formattingMenu.Items.Add("Insert link…", null, (_, _) => InsertLink());
                     else if (button == list) formattingMenu.Items.Add("Cycle list style", null, (_, _) => CycleList());
                     else if (button == divider) formattingMenu.Items.Add("Cycle divider", null, (_, _) => CycleDivider());
@@ -325,24 +330,43 @@ internal sealed class NoteCard : UserControl
         if (editor is not null)
         {
             var formatting = new CorkSubmenuItem("Formatting");
-            formatting.DropDownItems.Add("Text size…", null, (_, _) => EditTextSize());
+            formatting.DropDownItems.Add("Text appearance…", null, (_, _) => EditTextSize());
             var indent = new CorkSubmenuItem("List indent");
             indent.DropDownItems.Add("Compact", null, (_, _) => SetListIndent(compact: true));
             indent.DropDownItems.Add("Standard", null, (_, _) => SetListIndent(compact: false));
+            indent.DropDownItems.Add(new ToolStripSeparator());
+            indent.DropDownItems.Add(new ToolStripMenuItem("Indent", null, (_, _) => ChangeListLevel(1)) { ShortcutKeyDisplayString = "Tab" });
+            indent.DropDownItems.Add(new ToolStripMenuItem("Outdent", null, (_, _) => ChangeListLevel(-1)) { ShortcutKeyDisplayString = "Shift+Tab" });
             formatting.DropDownItems.Add(indent);
             var freeForm = new CorkSubmenuItem("Free-form list");
             freeForm.DropDownItems.Add("Bullets", null, (_, _) => MakeFreeFormList(1));
             freeForm.DropDownItems.Add("Numbers", null, (_, _) => MakeFreeFormList(2));
             freeForm.DropDownItems.Add("Dashes", null, (_, _) => MakeFreeFormList(3));
             formatting.DropDownItems.Add(freeForm);
+            var layout = ListLayoutMenu(editor!);
+            formatting.DropDownItems.Add(layout);
+            formatting.DropDownOpening += (_, _) => layout.Enabled = NoteListLayout.CanArrange(editor!);
             formatting.DropDownItems.Add(new ToolStripSeparator());
+            var readingMode = new CorkSubmenuItem("Reading mode");
+            var scroll = new ToolStripMenuItem("Scroll", null, (_, _) => board.ChangeNoteReadingMode(note, false));
+            var paged = new ToolStripMenuItem("Pages", null, (_, _) => board.ChangeNoteReadingMode(note, true));
+            readingMode.DropDownItems.AddRange([scroll, paged]);
+            readingMode.DropDownOpening += (_, _) =>
+            {
+                scroll.Checked = !note.UsePages;
+                paged.Checked = note.UsePages;
+            };
+            formatting.DropDownItems.Add(readingMode);
             formatting.DropDownItems.Add("Timestamp format…", null, (_, _) =>
             {
-                var format = NoteTimestamp.ChooseFormat(FindForm() ?? board, note.TimestampFormat);
-                if (format.HasValue) board.ChangeTimestampFormat(note, format.Value);
+                var format = NoteTimestamp.ChooseFormat(FindForm() ?? board, note.TimestampFormat, note.SubtleTimestamps, writingArea.BackColor);
+                if (format is { } choice) board.ChangeTimestampFormat(note, choice.Format, choice.Subtle);
             });
             menu.Items.Add(formatting);
-            menu.Items.Add("Daily checklist reset…", null, (_, _) => board.EditChecklistReset(note, FindForm() ?? board));
+            menu.Items.Add("Note rules…", null, (_, _) => EditRules());
+            var reminder = menu.Items.Add("Set reminder…", null, (_, _) => EditReminder());
+            reminder.Available = false;
+            menu.Opening += (_, _) => reminder.Available = editor is { SelectionLength: > 0 };
         }
         menu.Items.Add(new ToolStripSeparator());
         if (!floating) menu.Items.Add(isTable ? "Pop out table" : "Pop out note", null, (_, _) => board.PopOut(note));
@@ -385,11 +409,17 @@ internal sealed class NoteCard : UserControl
         RefreshPin();
         ApplyColor();
         ReadText();
+        RefreshReadingMode();
     }
 
     public Point PinPointOnParent => new(Left + Padding.Left + header.Left + (pin?.Left ?? 0) + (pin?.Width ?? 28) / 2,
         Top + Padding.Top + header.Top + (pin?.Top ?? 0) + (pin?.Height ?? header.Height) / 2);
     public StickyNote Note => note;
+    internal void RefreshReadingMode()
+    {
+        noteScrollBar?.SetActive(!note.UsePages);
+        pages?.SetEnabled(note.UsePages);
+    }
 
     public void SetConnectionTarget(bool value)
     {
@@ -413,6 +443,15 @@ internal sealed class NoteCard : UserControl
     }
 
     public void RefreshTable() => tableGrid?.Reload();
+    internal void RefreshFromHistory()
+    {
+        RefreshLabel();
+        RefreshPin();
+        ApplyColor();
+        ReadText();
+        RefreshReadingMode();
+        RefreshTable();
+    }
     public void CommitTableEdit() => tableGrid?.CommitEdit();
 
     public void RefreshPin()
@@ -445,7 +484,7 @@ internal sealed class NoteCard : UserControl
         RefreshFormattingButtons();
     }
 
-    private static void LoadNoteText(RichTextBox editor, StickyNote note)
+    internal static void LoadNoteText(RichTextBox editor, StickyNote note)
     {
         if (!string.IsNullOrWhiteSpace(note.FormattedText))
         {
@@ -467,6 +506,8 @@ internal sealed class NoteCard : UserControl
         if (editor is not null) editor.BackColor = paper;
         tableGrid?.ApplyColor(paper, controls);
         writingArea.BackColor = paper;
+        pages?.ApplyColor(paper, controls);
+        noteScrollBar?.ApplyColor(paper, controls);
         header.BackColor = controls;
         if (photoCaption is not null) photoCaption.BackColor = paper;
         if (toolbar is not null) toolbar.BackColor = paper;
@@ -573,8 +614,21 @@ internal sealed class NoteCard : UserControl
 
     protected override bool ProcessCmdKey(ref Message message, Keys keys)
     {
-        if (editor is not null && editor.Focused && keys == Keys.Enter && NoteParagraphs.HandleDashEnter(editor))
+        if (board.HandleHistoryKey(keys, this)) return true;
+        if (editor is NoteTextEditor { TurnPage: { } turn } && keys is (Keys.Alt | Keys.PageUp) or (Keys.Alt | Keys.PageDown))
+        {
+            turn(keys == (Keys.Alt | Keys.PageUp) ? -1 : 1);
             return true;
+        }
+        if (editor is not null && editor.Focused && keys is Keys.Tab or (Keys.Shift | Keys.Tab)
+            && ChangeListLevel(keys == Keys.Tab ? 1 : -1)) return true;
+        if (editor is not null && editor.Focused && keys == Keys.Enter)
+        {
+            bool handled = false;
+            using var edit = board.EditNote(note, "continue list");
+            EditText(() => handled = NoteParagraphs.ContinueChecklist(editor) || NoteParagraphs.HandleDashEnter(editor));
+            if (handled) return true;
+        }
         if (editor is not null && keys == (Keys.Control | Keys.K))
         {
             InsertLink();
@@ -587,8 +641,8 @@ internal sealed class NoteCard : UserControl
         }
         if (editor is not null && keys == (Keys.Control | Keys.Shift | Keys.Enter))
         {
-            int marker = LineStart(editor.Text, editor.SelectionStart);
-            if (IsChecklistItem(editor.Text, marker))
+            int marker = FindChecklistMarker(editor.Text, LineStart(editor.Text, editor.SelectionStart));
+            if (marker >= 0)
             {
                 ToggleChecklistItem(marker);
                 return true;
@@ -604,27 +658,71 @@ internal sealed class NoteCard : UserControl
     {
         if (editor is null) return;
         editor.Focus();
-        EditText(() => NoteParagraphs.CycleList(editor));
+        var rule = CaptureRule(NoteRules.Trigger.List);
+        using var edit = board.EditContent(note, "change list style", rule);
+        bool applied = false;
+        EditText(() => applied = NoteParagraphs.CycleList(editor));
+        if (applied) RunContentRule(NoteRules.Trigger.List, rule, useCurrentLine: true);
     }
 
     private void SetListIndent(bool compact)
     {
         if (editor is null) return;
         editor.Focus();
+        using var edit = board.EditNote(note, "change list indent");
         EditText(() => NoteParagraphs.SetListIndent(editor, compact));
+    }
+
+    private bool ChangeListLevel(int direction)
+    {
+        if (editor is null) return false;
+        editor.Focus();
+        bool handled = false;
+        using var edit = board.EditNote(note, "change list level");
+        EditText(() => handled = NoteParagraphs.AdjustListLevel(editor, direction));
+        return handled;
     }
 
     private void MakeFreeFormList(int style)
     {
         if (editor is null) return;
         editor.Focus();
+        var rule = CaptureRule(NoteRules.Trigger.List);
+        using var edit = board.EditContent(note, "change list style", rule);
         EditText(() => NoteParagraphs.MakeFreeFormList(editor, style));
+        RunContentRule(NoteRules.Trigger.List, rule, useCurrentLine: true);
+    }
+
+    private void ArrangeList(int columns)
+    {
+        if (editor is null || !NoteListLayout.CanArrange(editor, columns == 1)) return;
+        editor.Focus();
+        using var edit = board.EditNote(note, "change list layout");
+        bool arranged = false;
+        EditText(() => arranged = NoteListLayout.Arrange(editor, columns));
+        if (!arranged) board.ShowNotice("Items are too wide for that layout. Try fewer columns or widen the note.");
+    }
+
+    private CorkSubmenuItem ListLayoutMenu(RichTextBox text)
+    {
+        var layout = new CorkSubmenuItem("List layout");
+        layout.DropDownItems.Add("Across a row", null, (_, _) => ArrangeList(0));
+        for (int columns = 2; columns <= 4; columns++)
+        {
+            int count = columns;
+            layout.DropDownItems.Add($"{count} columns", null, (_, _) => ArrangeList(count));
+        }
+        layout.DropDownItems.Add(new ToolStripSeparator());
+        var stack = layout.DropDownItems.Add("Single column", null, (_, _) => ArrangeList(1));
+        layout.DropDownOpening += (_, _) => stack.Enabled = NoteListLayout.CanArrange(text, restoring: true);
+        return layout;
     }
 
     private void CycleDivider()
     {
         if (editor is null) return;
         editor.Focus();
+        using var edit = board.EditNote(note, "change divider");
         EditText(() => NoteParagraphs.CycleDivider(editor));
     }
 
@@ -633,23 +731,51 @@ internal sealed class NoteCard : UserControl
         if (editor is null) return;
         int start = editor.SelectionStart;
         int length = editor.SelectionLength;
+        var rule = CaptureRule(NoteRules.Trigger.Link);
         var link = NoteLinkPrompt.Show(FindForm() ?? board, NoteLinks.SelectedDisplayText(editor));
         if (link is not { } chosen) return;
+        using var edit = board.EditContent(note, "insert link", rule);
         editor.Focus();
         editor.Select(start, length);
+        int remainder = editor.TextLength - start - length;
         EditText(() => NoteLinks.Insert(editor, chosen.Alias, chosen.Destination, chosen.Color));
+        int end = editor.TextLength - remainder;
+        if (rule is not null && end > start)
+        {
+            int caret = editor.SelectionStart;
+            editor.Select(start, end - start);
+            if (!RunContentRule(NoteRules.Trigger.Link, rule)) editor.Select(caret, 0);
+        }
     }
 
     private void InsertTimestamp()
     {
         if (editor is null) return;
         editor.Focus();
+        var rule = CaptureRule(NoteRules.Trigger.Timestamp);
+        using var edit = board.EditContent(note, "insert timestamp", rule);
+        int inserted = 0, count = 0;
         // Use the editor's normal input path so divider rows and link boundaries are protected.
         EditText(() =>
         {
             ((NoteTextEditor)editor).MovePastDivider();
-            NoteLinks.InsertPlainText(editor, NoteTimestamp.Format(DateTime.Now, note.TimestampFormat));
+            int start = editor.SelectionStart;
+            CharFormat original = ReadSelectionFormat(editor);
+            Color ink = editor.SelectionColor;
+            string stamp = NoteTimestamp.Format(DateTime.Now, note.TimestampFormat);
+            inserted = start;
+            count = stamp.Length;
+            NoteLinks.InsertPlainText(editor, stamp, bold: !note.SubtleTimestamps,
+                color: note.SubtleTimestamps ? TextSizePrompt.TextInk(writingArea.BackColor, 65) : null);
+            editor.Select(start + stamp.Length, 0);
+            SetFormat(editor, 1, (original.Mask & original.Effects & 1) != 0);
+            editor.SelectionColor = ink.IsEmpty ? editor.ForeColor : ink;
         });
+        if (rule is not null)
+        {
+            editor.Select(inserted, count);
+            if (!RunContentRule(NoteRules.Trigger.Timestamp, rule)) editor.Select(inserted + count, 0);
+        }
     }
 
     private void OpenLink(string? address)
@@ -672,6 +798,7 @@ internal sealed class NoteCard : UserControl
             pinMenu.Dispose();
             colorMenu?.Dispose();
             formattingMenu?.Dispose();
+            textMenu?.Dispose();
         }
         base.Dispose(disposing);
     }
@@ -711,16 +838,29 @@ internal sealed class NoteCard : UserControl
         if (editor is NoteTextEditor noteEditor && noteEditor.TryGetDivider(out _))
         {
             int dividerFlag = effect switch { 1 => 1, 4 => 2, _ => 0 };
-            if (dividerFlag != 0) EditText(() => noteEditor.ToggleDividerFormat(dividerFlag));
+            if (dividerFlag != 0)
+            {
+                using var edit = board.EditNote(note, "format divider");
+                EditText(() => noteEditor.ToggleDividerFormat(dividerFlag));
+            }
             return;
         }
         CharFormat current = ReadSelectionFormat(editor);
-        SetFormat(editor, effect, (current.Mask & current.Effects & effect) == 0);
+        bool enabled = (current.Mask & current.Effects & effect) == 0;
+        var trigger = effect switch
+        {
+            Bold => NoteRules.Trigger.Bold, 2 => NoteRules.Trigger.Italic, 4 => NoteRules.Trigger.Underline, _ => NoteRules.Trigger.Strike
+        };
+        if (enabled && HasContentRule(trigger) && TryGetSelectedText(out var selection)
+            && BoardWindow.ResolveContentRule(note, trigger, selection, editor.Text) is { } rule
+            && board.TryApplyContentRule(note, editor, selection, rule, EditText,
+                applyTrigger: box => SetFormat(box, effect, true))) return;
+        SetFormat(editor, effect, enabled);
         RefreshFormattingButtons();
         PublishEdit();
     }
 
-    private static void SetFormat(RichTextBox editor, uint effect, bool enabled)
+    internal static void SetFormat(RichTextBox editor, uint effect, bool enabled)
     {
         var change = CharFormat.Empty;
         change.Mask = effect;
@@ -733,20 +873,35 @@ internal sealed class NoteCard : UserControl
         if (editor is null) return;
         int start = editor.SelectionStart;
         int length = editor.SelectionLength;
-        int defaultHeight = (int)Math.Round(editor.Font.SizeInPoints * 20);
         CharFormat selection = ReadSelectionFormat(editor);
-        int current = (selection.Mask & FontSizeMask) == 0 || selection.Height == defaultHeight
-            ? 0 : Math.Clamp((int)Math.Round(selection.Height / 20.0), 1, MaximumTextSize);
-        int? size = TextSizePrompt.Show(FindForm() ?? board, current, MaximumTextSize, editor.Font, writingArea.BackColor);
-        if (size is null) return;
+        int? current = (selection.Mask & FontSizeMask) == 0 ? null
+            : Math.Clamp((int)Math.Round(selection.Height / 20.0), 1, MaximumTextSize);
+        var appearance = TextSizePrompt.Show(FindForm() ?? board, current, MaximumTextSize, editor.Font,
+            (selection.Mask & FontFaceMask) != 0 ? selection.FaceName : null, writingArea.BackColor, editor.SelectionColor);
+        if (appearance is not { } choice) return;
+        var rule = CaptureRule(NoteRules.Trigger.TextAppearance);
+        using var edit = board.EditContent(note, "change text appearance", rule);
 
         editor.Focus();
         editor.Select(start, length);
-        var change = CharFormat.Empty;
-        change.Mask = FontSizeMask;
-        change.Height = size == 0 ? defaultHeight : size.Value * 20;
-        SendFormat(editor.Handle, 0x0444, new IntPtr(1), ref change);
+        if (choice.Size is int size)
+        {
+            var change = CharFormat.Empty;
+            change.Mask = FontSizeMask;
+            change.Height = size * 20;
+            SendFormat(editor.Handle, 0x0444, new IntPtr(1), ref change);
+        }
+        if (choice.Family is string family)
+        {
+            var change = CharFormat.Empty;
+            change.Mask = FontFaceMask;
+            change.FaceName = family;
+            SendFormat(editor.Handle, 0x0444, new IntPtr(1), ref change);
+        }
+        if (choice.Ink is Color ink) editor.SelectionColor = ink;
         PublishEdit();
+        if (choice.Size.HasValue || choice.Family is not null || choice.Ink.HasValue)
+            RunContentRule(NoteRules.Trigger.TextAppearance, rule);
     }
 
     private static void PaintChecklistButton(object? sender, PaintEventArgs e)
@@ -801,9 +956,9 @@ internal sealed class NoteCard : UserControl
         int start = editor.SelectionStart;
         int end = start + editor.SelectionLength;
         int firstLine = LineStart(text, start);
-        if (start == end && IsChecklistItem(text, firstLine))
+        if (start == end && FindChecklistMarker(text, firstLine) is int existing && existing >= 0)
         {
-            ToggleChecklistItem(firstLine);
+            ToggleChecklistItem(existing);
             return;
         }
         bool hasLinks = note.FormattedText?.Contains(@"\fldinst", StringComparison.Ordinal) == true;
@@ -813,22 +968,28 @@ internal sealed class NoteCard : UserControl
             firstLine = LineStart(text, start);
         }
 
-        var items = new List<(int Start, int End, bool BreakBefore, bool BreakAfter)>();
+        var items = new List<(int Start, int End, int PrefixLength, bool BreakBefore, bool BreakAfter)>();
         for (int line = firstLine; ; )
         {
             int lineEnd = LineEnd(text, line);
-            if (!IsChecklistItem(text, line))
+            if (FindChecklistMarker(text, line) < 0)
             {
                 int itemStart = start == end ? line : Math.Max(start, line);
                 int itemEnd = start == end ? lineEnd : Math.Min(end, lineEnd);
+                int prefixLength = NoteParagraphs.FreeFormPrefixLength(text.AsSpan(line, lineEnd - line));
+                if (prefixLength > 0 && itemStart <= line + prefixLength && itemEnd >= line + prefixLength)
+                    itemStart = line;
+                else prefixLength = 0;
                 if (start == end || (itemEnd > itemStart && !text.AsSpan(itemStart, itemEnd - itemStart).IsWhiteSpace()))
-                    items.Add((itemStart, itemEnd, itemStart > line, itemEnd < lineEnd));
+                    items.Add((itemStart, itemEnd, prefixLength, itemStart > line, itemEnd < lineEnd));
             }
             if (lineEnd + 1 >= end) break;
             line = lineEnd + 1;
         }
         if (items.Count == 0) return;
 
+        var rule = CaptureRule(NoteRules.Trigger.ChecklistCreated);
+        using var edit = board.EditContent(note, "create checklist items", rule);
         int caret = items[^1].End;
         EditText(() =>
         {
@@ -841,17 +1002,24 @@ internal sealed class NoteCard : UserControl
                     InsertChecklistText("\n");
                 }
                 string prefix = item.BreakBefore ? $"\n{UncheckedItem} " : $"{UncheckedItem} ";
-                editor.Select(item.Start, 0);
+                editor.Select(item.Start, item.PrefixLength);
                 InsertChecklistText(prefix);
                 int marker = item.Start + prefix.Length - 2;
-                editor.Select(marker, item.End - item.Start + 2);
+                NoteParagraphs.ClearListMarker(editor, marker);
+                editor.Select(marker, item.End - item.Start - item.PrefixLength + 2);
                 SetFormat(editor, Strikeout, false);
-                caret += prefix.Length;
+                caret += prefix.Length - item.PrefixLength;
                 if (i != items.Count - 1 && item.BreakAfter) caret++;
             }
             editor.Select(caret, 0);
             SetFormat(editor, Strikeout, false);
         });
+        if (rule is not null)
+        {
+            int firstItem = items[0].Start + (items[0].BreakBefore ? 1 : 0);
+            editor.Select(firstItem, Math.Max(0, caret - firstItem));
+            if (!RunContentRule(NoteRules.Trigger.ChecklistCreated, rule)) editor.Select(caret, 0);
+        }
 
         void InsertChecklistText(string value)
         {
@@ -862,7 +1030,7 @@ internal sealed class NoteCard : UserControl
 
     private void ClickChecklistItem(object? sender, MouseEventArgs e)
     {
-        if (e.Button != MouseButtons.Left || e.Clicks != 1) return;
+        if (e.Button != MouseButtons.Left) return;
         int marker = ChecklistMarkerAt(e.Location);
         if (marker >= 0) ToggleChecklistItem(marker);
     }
@@ -870,12 +1038,27 @@ internal sealed class NoteCard : UserControl
     private int ChecklistMarkerAt(Point pointer)
     {
         if (editor is null || editorText.Length < 2) return -1;
-        int marker = LineStart(editorText, editor.GetCharIndexFromPosition(pointer));
-        if (!IsChecklistItem(editorText, marker)) return -1;
-        Point left = editor.GetPositionFromCharIndex(marker);
-        Point right = editor.GetPositionFromCharIndex(marker + 1);
-        var target = new Rectangle(left, new Size(Math.Max(1, right.X - left.X), editor.Font.Height + 2));
-        return target.Contains(pointer) ? marker : -1;
+        int line = LineStart(editorText, editor.GetCharIndexFromPosition(pointer));
+        int marker = BoxAt(line);
+        if (marker >= 0) return marker;
+        // RichEdit can snap a hit in the left indent to the adjacent paragraph.
+        int next = LineEnd(editorText, line) + 1;
+        if (line > 0 && (marker = BoxAt(LineStart(editorText, line - 1))) >= 0) return marker;
+        return next < editorText.Length ? BoxAt(next) : -1;
+
+        int BoxAt(int start)
+        {
+            start = FindChecklistMarker(editorText, start);
+            if (start < 0) return -1;
+            Point left = editor.GetPositionFromCharIndex(start);
+            Point right = editor.GetPositionFromCharIndex(start + 1);
+            int nextRow = editor.GetFirstCharIndexFromLine(editor.GetLineFromCharIndex(start) + 1);
+            int bottom = nextRow > start ? editor.GetPositionFromCharIndex(nextRow).Y
+                : left.Y + Math.Max(editor.Font.Height + 3, right.X - left.X + 5);
+            int boxRight = right.Y == left.Y ? right.X : left.X + editor.Font.Height;
+            var target = Rectangle.FromLTRB(left.X - 2, left.Y, Math.Max(left.X + 5, boxRight + 2), bottom);
+            return target.Contains(pointer) ? start : -1;
+        }
     }
 
     private void ToggleChecklistItem(int marker)
@@ -884,16 +1067,150 @@ internal sealed class NoteCard : UserControl
         string text = editor.Text;
         if (!IsChecklistItem(text, marker)) return;
         bool complete = text[marker] == UncheckedItem;
+        int line = ChecklistItemRule.LineAt(text, marker);
+        if (complete && ChecklistItemRule.GetSettings(note, line).Destination is Guid destination
+            && board.TryMoveCheckedItem(note, marker, destination)) return;
         int start = editor.SelectionStart;
         int length = editor.SelectionLength;
+        if (!complete && HasContentRule(NoteRules.Trigger.Uncheck))
+        {
+            int end = LineEnd(text, marker);
+            editor.Select(marker, end - marker);
+            if (TryGetSelectedText(out var selection)
+                && BoardWindow.ResolveContentRule(note, NoteRules.Trigger.Uncheck, selection, text) is { } rule
+                && board.TryApplyContentRule(note, editor, selection, rule, EditText,
+                    applyTrigger: box =>
+                    {
+                        SetChecklistState(box, marker, end, complete: false);
+                        box.Select(marker, end - marker);
+                    }, removeItemLine: true))
+                return;
+            editor.Select(start, length);
+        }
+        using var edit = board.EditNote(note, complete ? "check item" : "uncheck item");
         EditText(() =>
         {
             SetChecklistState(editor, marker, LineEnd(text, marker), complete);
             editor.Select(start, length);
         });
+        board.TrackChecklistToggle(note, line, complete);
+        if (complete && HasContentRule(NoteRules.Trigger.Check))
+        {
+            editor.Select(marker, LineEnd(editor.Text, marker) - marker);
+            if (!RunContentRule(NoteRules.Trigger.Check)) editor.Select(start, length);
+        }
     }
 
-    public static bool ResetCheckedItems(StickyNote note)
+    private void EditRules()
+    {
+        if (editor is null) return;
+        Form owner = FindForm() ?? board;
+        if (!TryGetSelectedText(out var selection))
+        {
+            board.EditNoteRules(note, owner);
+            return;
+        }
+        int first = LineStart(editor.Text, selection.NativeStart);
+        bool checklist = FindChecklistMarker(editor.Text, first) >= 0
+            && selection.NativeEnd <= LineEnd(editor.Text, first);
+        board.EditNoteRules(note, owner, selection, checklist ? ChecklistItemRule.LineAt(editor.Text, first) : null);
+    }
+
+    private void EditReminder()
+    {
+        if (TryGetSelectedText(out var selection))
+            board.ScheduleReminder(note, FindForm() ?? board, selection);
+    }
+
+    private CorkMenu BuildTextMenu(RichTextBox text)
+    {
+        var popup = new CorkMenu { ShowCheckMargin = false, ShowImageMargin = false };
+        ToolStripItem rule = popup.Items.Add("Set rule…", null, (_, _) => EditRules());
+        ToolStripItem reminder = popup.Items.Add("Set reminder…", null, (_, _) => EditReminder());
+        ToolStripItem checklist = popup.Items.Add("Make checklist item", null, (_, _) => AddChecklistItems());
+        ToolStripItem link = popup.Items.Add("Insert link…", null, (_, _) => InsertLink());
+        var layout = ListLayoutMenu(text);
+        popup.Items.Add(layout);
+        popup.Items.Add(new ToolStripSeparator());
+        ToolStripItem cut = Add("Cut", "Ctrl+X", text.Cut);
+        ToolStripItem copy = Add("Copy", "Ctrl+C", () =>
+        {
+            if (TryGetSelectedText(out _)) text.Copy();
+        });
+        ToolStripItem paste = Add("Paste", "Ctrl+V", text.Paste);
+        ToolStripItem all = Add("Select all", "Ctrl+A", text.SelectAll);
+        popup.Opening += (_, _) =>
+        {
+            popup.SetSurface(writingArea.BackColor);
+            bool selected = TryGetSelectedText(out _);
+            rule.Text = selected ? "Set rule…" : "Note rules…";
+            reminder.Available = selected;
+            checklist.Available = selected;
+            layout.Available = selected && NoteListLayout.CanArrange(text);
+            cut.Enabled = copy.Enabled = text.SelectionLength > 0;
+            all.Enabled = text.TextLength > 0;
+            try { paste.Enabled = Clipboard.ContainsText() || Clipboard.ContainsData(DataFormats.Rtf); }
+            catch (ExternalException) { paste.Enabled = true; }
+        };
+        return popup;
+
+        ToolStripItem Add(string title, string keys, Action command)
+        {
+            var item = new ToolStripMenuItem(title, null, (_, _) =>
+            {
+                text.Focus();
+                try { command(); }
+                catch (ExternalException) { board.ShowNotice("The clipboard is busy. Try again."); }
+            }) { ShortcutKeyDisplayString = keys };
+            popup.Items.Add(item);
+            return item;
+        }
+    }
+
+    private bool TryGetSelectedText(out NoteRules.Selection selection)
+    {
+        selection = default;
+        if (editor is null || editor.SelectionLength == 0) return false;
+        int savedStart = editor.SelectionStart, savedLength = editor.SelectionLength;
+        int start = savedStart, end = savedStart + savedLength;
+        if (note.FormattedText?.Contains(@"\fldinst", StringComparison.Ordinal) == true)
+            (start, end) = NoteLinks.IncludeWholeLinks(editor, editor.Text, start, end);
+        editor.Select(start, end - start);
+        string value = NoteParagraphs.RemoveDividerMarkers(NoteLinks.SelectedDisplayText(editor));
+        editor.Select(0, start);
+        int offset = NoteParagraphs.RemoveDividerMarkers(NoteLinks.SelectedDisplayText(editor)).Length;
+        editor.Select(savedStart, savedLength);
+        selection = new(start, end, offset, value);
+        return !string.IsNullOrWhiteSpace(value);
+    }
+
+    private NoteRules.Settings? CaptureRule(NoteRules.Trigger trigger) =>
+        editor is not null && HasContentRule(trigger) && TryGetSelectedText(out var selected)
+            ? BoardWindow.ResolveContentRule(note, trigger, selected, editor.Text) : NoteRules.WholeRule(note, trigger);
+
+    private bool HasContentRule(NoteRules.Trigger trigger) => note.ContentRules?.ContainsKey(trigger) == true
+        || (trigger is NoteRules.Trigger.Check or NoteRules.Trigger.Uncheck
+            ? note.ChecklistItems?.Any(item => trigger == NoteRules.Trigger.Check ? item.Settings is not null : item.Uncheck is not null) == true
+            : note.TextSelectionRules?.Any(rule => rule.Trigger == trigger) == true);
+
+    private bool RunContentRule(NoteRules.Trigger trigger, NoteRules.Settings? original = null, bool useCurrentLine = false)
+    {
+        if (editor is null || !HasContentRule(trigger)) return false;
+        int start = editor.SelectionStart, length = editor.SelectionLength;
+        if (length == 0 && useCurrentLine)
+        {
+            string text = editor.Text;
+            int first = LineStart(text, start);
+            editor.Select(first, LineEnd(text, first) - first);
+        }
+        if (TryGetSelectedText(out var active) && (original ?? BoardWindow.ResolveContentRule(note, trigger, active, editor.Text)) is { } rule
+            && board.TryApplyContentRule(note, editor, active, rule, EditText))
+            return true;
+        editor.Select(start, length);
+        return false;
+    }
+
+    public static bool ResetCheckedItems(StickyNote note, Func<int, bool>? shouldReset = null)
     {
         if (!note.Text.Contains(CheckedItem)) return false;
 
@@ -901,12 +1218,13 @@ internal sealed class NoteCard : UserControl
         LoadNoteText(editor, note);
         string text = editor.Text;
         bool changed = false;
-        for (int line = 0; line < text.Length;)
+        for (int line = 0, index = 0; line < text.Length; index++)
         {
             int end = LineEnd(text, line);
-            if (text[line] == CheckedItem && IsChecklistItem(text, line))
+            int marker = FindChecklistMarker(text, line);
+            if (marker >= 0 && text[marker] == CheckedItem && (shouldReset?.Invoke(index) ?? true))
             {
-                SetChecklistState(editor, line, end, complete: false);
+                SetChecklistState(editor, marker, end, complete: false);
                 changed = true;
             }
             line = end + 1;
@@ -920,11 +1238,11 @@ internal sealed class NoteCard : UserControl
         return changed;
     }
 
-    private static void SetChecklistState(RichTextBox editor, int marker, int end, bool complete)
+    internal static void SetChecklistState(RichTextBox editor, int marker, int end, bool complete)
     {
         editor.Select(marker, 1);
         editor.SelectedText = (complete ? CheckedItem : UncheckedItem).ToString();
-        editor.Select(marker, 2);
+        editor.Select(marker, Math.Min(2, end - marker));
         SetFormat(editor, Strikeout, false);
         if (end <= marker + 2) return;
         editor.Select(marker + 2, end - marker - 2);
@@ -940,16 +1258,24 @@ internal sealed class NoteCard : UserControl
         PublishEdit();
     }
 
-    private static bool IsChecklistItem(string text, int line) =>
-        line + 1 < text.Length && text[line] is UncheckedItem or CheckedItem && text[line + 1] == ' ';
+    internal static bool IsChecklistItem(string text, int line) =>
+        line < text.Length && text[line] is UncheckedItem or CheckedItem
+        && (line + 1 == text.Length || text[line + 1] is ' ' or '\u00a0' or '\t' or '\n');
 
-    private static int LineStart(string text, int position)
+    internal static int FindChecklistMarker(string text, int line)
+    {
+        int marker = line;
+        while (marker < text.Length && text[marker] is ' ' or '\t' or '\u00a0') marker++;
+        return IsChecklistItem(text, marker) ? marker : -1;
+    }
+
+    internal static int LineStart(string text, int position)
     {
         int before = Math.Min(text.Length, position) - 1;
         return before < 0 ? 0 : text.LastIndexOf('\n', before) + 1;
     }
 
-    private static int LineEnd(string text, int start)
+    internal static int LineEnd(string text, int start)
     {
         int end = text.IndexOf('\n', start);
         return end >= 0 ? end : text.Length;
@@ -976,12 +1302,14 @@ internal sealed class NoteCard : UserControl
         return format;
     }
 
-    private void PublishEdit()
+    private void PublishEdit(bool runTextRules = false)
     {
         if (refreshing || editor is null) return;
         editorText = editor.Text;
         string rtf = editor.Rtf ?? "";
-        board.ChangeText(note, NoteLinks.DisplayText(editor, editorText, rtf), rtf, this);
+        board.ChangeText(note, NoteLinks.DisplayText(editor, editorText, rtf), rtf, this, runTextRules);
+        pages?.Reflow();
+        noteScrollBar?.RefreshScroll();
     }
 
     private void WireDragHandle(Control handle)

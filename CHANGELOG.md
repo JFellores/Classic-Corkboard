@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.0 — Recovery history, reminders, and note layouts
+
+- Added local Version history for deleted notes and slides. Recover a deletion after restarting, including a slide’s cards and eligible threads.
+- Added recurring reminders with daily or selected weekdays, a notification center, snoozing, and configurable sound.
+- Added rules for whole notes or selected text, including checklist resets, formatting actions, timestamps, and moves to connected notes.
+- Added global undo and redo, list layouts with up to four columns, scroll and page reading modes, and font and opacity controls.
+- Refined text and action cursors, nested checklists, and the compact Board menu. Windows startup now has an On or Off badge.
+
 ## 0.7.3 — Add slides, checklists, and table cards
 
 - Added numbered slides with no scrollbars on the cork surface. After each slide settles, its cards pop in and threads draw from their source pins. Right-click the cork to add a note, image, or table. Table cards support range selection, copy and paste, editable rows and columns, and five aggregate functions. Click or drag across cells while writing a formula to insert their reference. Select note text to turn it into a checklist item, change its size, or turn it into a clickable web link. Choose a daily checklist reset time on any note. Press Ctrl+Alt+B to minimize or restore the corkboard from any app.

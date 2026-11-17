@@ -34,10 +34,12 @@ internal static class NoteTimestamp
             _ => "dd/MM/yyyy h:mm tt"
         }, CultureInfo.InvariantCulture);
 
-    public static NoteTimestampFormat? ChooseFormat(IWin32Window owner, NoteTimestampFormat current)
+    public static (NoteTimestampFormat Format, bool Subtle)? ChooseFormat(IWin32Window owner, NoteTimestampFormat current,
+        bool subtle, Color paper)
     {
-        using var dialog = new CorkDialog("Timestamp format", 298);
-        using var previewFont = new Font("Segoe UI Semibold", 14F);
+        using var dialog = new CorkDialog("Timestamp format", 345);
+        using var boldFont = new Font("Segoe UI", 14F, FontStyle.Bold);
+        using var subtleFont = new Font("Segoe UI", 14F);
         var label = new Label { Text = "Date and time format", Bounds = new Rectangle(22, 56, 328, 23) };
         var formats = new ComboBox
         {
@@ -46,30 +48,40 @@ internal static class NoteTimestamp
         };
         formats.Items.AddRange(Choices.Select(choice => (object)choice.Name).ToArray());
         formats.SelectedIndex = Math.Max(0, Array.FindIndex(Choices, choice => choice.Format == current));
-        var preview = new Panel { BackColor = Color.FromArgb(245, 235, 219), Bounds = new Rectangle(22, 124, 328, 77) };
+        var weight = new Panel { Bounds = new Rectangle(22, 116, 328, 34) };
+        var boldChoice = new RadioButton { Text = "Bold", Bounds = new Rectangle(0, 0, 112, 31), Checked = !subtle };
+        var subtleChoice = new RadioButton { Text = "Subtle", Bounds = new Rectangle(118, 0, 125, 31), Checked = subtle };
+        weight.Controls.AddRange([boldChoice, subtleChoice]);
+        var preview = new Panel { BackColor = paper, Bounds = new Rectangle(22, 162, 328, 77) };
         preview.Resize += (_, _) => BoardStyle.RoundCorners(preview, preview.LogicalToDeviceUnits(8));
         BoardStyle.RoundCorners(preview, 8);
         var caption = new Label { Text = "Preview", ForeColor = BoardStyle.Muted, Bounds = new Rectangle(12, 9, 300, 21) };
         var example = new Label
         {
-            AccessibleName = "Timestamp preview", Font = previewFont, Bounds = new Rectangle(12, 32, 304, 33),
+            AccessibleName = "Timestamp preview", Bounds = new Rectangle(12, 32, 304, 33),
             TextAlign = ContentAlignment.MiddleLeft
         };
         var hint = new Label
         {
             Text = "Applies to new timestamps in this note.", ForeColor = BoardStyle.Muted,
-            Bounds = new Rectangle(22, 212, 328, 22)
+            Bounds = new Rectangle(22, 251, 328, 22)
         };
         DateTime now = DateTime.Now;
         formats.SelectedIndexChanged += (_, _) => UpdatePreview();
+        subtleChoice.CheckedChanged += (_, _) => UpdatePreview();
         UpdatePreview();
         preview.Controls.AddRange([caption, example]);
-        dialog.Controls.AddRange([label, formats, preview, hint]);
+        dialog.Controls.AddRange([label, formats, weight, preview, hint]);
         dialog.AddActions("Save", acceptWithEnter: true);
         dialog.Shown += (_, _) => formats.Focus();
-        return dialog.ShowDialog(owner) == DialogResult.OK ? Choices[formats.SelectedIndex].Format : null;
+        return dialog.ShowDialog(owner) == DialogResult.OK ? (Choices[formats.SelectedIndex].Format, subtleChoice.Checked) : null;
 
-        void UpdatePreview() => example.Text = Format(now, Choices[formats.SelectedIndex].Format);
+        void UpdatePreview()
+        {
+            example.Text = Format(now, Choices[formats.SelectedIndex].Format);
+            example.Font = subtleChoice.Checked ? subtleFont : boldFont;
+            example.ForeColor = TextSizePrompt.TextInk(paper, subtleChoice.Checked ? 65 : 100);
+        }
     }
 
     public static void PaintIcon(object? sender, PaintEventArgs e)

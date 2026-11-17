@@ -16,7 +16,8 @@ internal sealed class BoardWindow : ResizableWindow
     private readonly Dictionary<Guid, Image?> images = [];
     private readonly Dictionary<Guid, FloatingNote> floating = [];
     private readonly Button fab;
-    private readonly Panel actions;
+    private readonly Button bell;
+    private readonly BoardActionMenu actions;
     private readonly Panel slideControls;
     private readonly Button previousSlide;
     private readonly Button slideCounter;
@@ -69,7 +70,7 @@ internal sealed class BoardWindow : ResizableWindow
     private int DrawerWidth => Pixels(280);
 
     protected override bool IsFrameCommand(Point point) =>
-        (fab?.Bounds.Contains(point) ?? false) || (slideControls?.Bounds.Contains(point) ?? false)
+        (fab?.Bounds.Contains(point) ?? false) || (bell?.Bounds.Contains(point) ?? false) || (slideControls?.Bounds.Contains(point) ?? false)
         || (notice?.Visible == true && notice.Bounds.Contains(point));
 
     public BoardWindow(CorkboardApp app, CorkBoard board)
@@ -92,7 +93,7 @@ internal sealed class BoardWindow : ResizableWindow
             StartPosition = FormStartPosition.Manual;
             Bounds = FitOnScreen(previous, MinimumSize, Screen.FromPoint(Cursor.Position));
         }
-        ResizeEnd += (_, _) => RememberBounds();
+        ResizeEnd += (_, _) => RememberBounds(record: true);
 
         corkViewport = new Panel
         {
@@ -111,8 +112,8 @@ internal sealed class BoardWindow : ResizableWindow
         canvasMenu.Items.Add("Add table", null, (_, _) => AddTable(canvasMenuPosition));
         canvas.MouseMove += (_, e) =>
         {
-            Cursor desired = !selectPin && !connectFrom.HasValue && board.Threads.Count > 0 && HitThread(e.Location) is not null
-                ? Cursors.Hand : Cursors.Default;
+            Cursor desired = selectPin || IsConnecting ? Cursors.Cross
+                : board.Threads.Count > 0 && HitThread(e.Location) is not null ? Cursors.Hand : Cursors.Default;
             if (canvas.Cursor != desired) canvas.Cursor = desired;
         };
         canvas.MouseDoubleClick += (_, e) =>
@@ -145,6 +146,13 @@ internal sealed class BoardWindow : ResizableWindow
         fab.Paint += PaintMenuGlyph;
         actions = BuildActions();
         slideControls = new Panel { AccessibleName = "Corkboard slides", BackColor = NavigationPaper };
+        bell = BoardStyle.Button("", NavigationPaper, BoardStyle.Ink);
+        bell.AccessibleName = "Reminders";
+        tips.SetToolTip(bell, "Reminders");
+        bell.Click += (_, _) => ReminderViews.ShowCenter(this, app.Reminders);
+        bell.Paint += PaintBell;
+        app.Reminders.Changed += RefreshBell;
+        RefreshBell();
         previousSlide = SlideButton("‹", "Previous slide", () => StepSlide(-1));
         slideCounter = SlideButton("", "Manage slides", ShowSlideMenu);
         slideCounter.BackColor = ActiveSlidePaper;
@@ -166,7 +174,8 @@ internal sealed class BoardWindow : ResizableWindow
         BuildDrawer();
         drawerMotion.Tick += (_, _) => SlideDrawer();
 
-        Controls.AddRange([corkViewport, drawerClip, actions, fab, notice, slideControls, shortcutHint]);
+        Controls.AddRange([corkViewport, drawerClip, actions, fab, notice, slideControls, shortcutHint, bell]);
+        bell.BringToFront();
         notice.BringToFront();
         fab.BringToFront();
         actions.BringToFront();
@@ -254,6 +263,7 @@ internal sealed class BoardWindow : ResizableWindow
 
     protected override bool ProcessCmdKey(ref Message msg, Keys keys)
     {
+        if (HandleHistoryKey(keys, this)) return true;
         if (keys == (Keys.Control | Keys.N)) { AddNote(); return true; }
         if (keys == (Keys.Control | Keys.PageUp)) { StepSlide(-1); return true; }
         if (keys == (Keys.Control | Keys.PageDown)) { StepSlide(1); return true; }
@@ -269,10 +279,20 @@ internal sealed class BoardWindow : ResizableWindow
         return base.ProcessCmdKey(ref msg, keys);
     }
 
+    internal bool HandleHistoryKey(Keys keys, Control origin) => app.HandleHistoryKey(keys, origin);
+    internal IDisposable EditNote(StickyNote note, string label) => app.BeginEdit(board, label, [note]);
+    internal IDisposable EditContent(StickyNote note, string label, NoteRules.Settings? rule) =>
+        rule?.Destination is Guid id && GetRuleDestination(note, id) is { } destination
+            ? app.BeginEdit(board, label, [note, destination]) : EditNote(note, label);
+    internal string? UndoLabel => app.UndoLabel;
+    internal string? RedoLabel => app.RedoLabel;
+    internal bool StepHistory(bool redo) => app.StepHistory(redo, this);
+
     protected override void Dispose(bool disposing)
     {
         if (disposing)
         {
+            app.Reminders.Changed -= RefreshBell;
             if (connectFrom.HasValue) ClearSelectionMode();
             closing = true;
             foreach (FloatingNote popup in floating.Values.ToArray()) popup.Dispose();
@@ -333,6 +353,15 @@ internal sealed class BoardWindow : ResizableWindow
         else FocusVisibleNote(note.Id);
     }
 
+    internal void ScheduleReminder(StickyNote note, Form owner, NoteRules.Selection selection)
+    {
+        if (ReminderViews.PickTime(owner, selection.Text) is { } schedule)
+        {
+            app.Reminders.Add(board, note, selection.Text, schedule.Due, selection.Offset, schedule.Repeat);
+            ShowNotice($"Reminder scheduled · {schedule.Due.LocalDateTime:g}");
+        }
+    }
+
     private void FocusVisibleNote(Guid noteId)
     {
         if (!cards.TryGetValue(noteId, out NoteCard? card)) return;
@@ -345,6 +374,8 @@ internal sealed class BoardWindow : ResizableWindow
     private void AddSlide()
     {
         if (board.HorizontalSlideCount == int.MaxValue) return;
+        CommitTableEdits();
+        using var edit = app.BeginEdit(board, "add slide");
         board.HorizontalSlideCount++;
         ShowSlide(new BoardSlide(board.HorizontalSlideCount - 1));
     }
@@ -554,6 +585,7 @@ internal sealed class BoardWindow : ResizableWindow
     private void CommitSlideDeletion(BoardSlide slide)
     {
         if (!board.HasSlide(slide) || IsLastSlide) return;
+        CommitTableEdits();
         ClearSelectionMode();
         StickyNote[] previousNotes = board.Notes.ToArray();
         NoteThread[] previousThreads = board.Threads.ToArray();
@@ -562,6 +594,9 @@ internal sealed class BoardWindow : ResizableWindow
         StickyNote[] removed = previousNotes.Where(note => note.SlideAddress == slide).ToArray();
         HashSet<Guid> removedIds = removed.Select(note => note.Id).ToHashSet();
         StickyNote[] shifted = previousNotes.Where(note => note.Slide > slide.Index).ToArray();
+        var entry = DeletedItem.Capture(board, slide.Index, removed);
+        DeletedItem[]? previousArchive = app.ArchiveDeletion(entry);
+        using var edit = app.BeginEdit(board, "delete slide", replayArchive: redo => app.SetArchived(entry, redo));
 
         board.Notes.RemoveAll(note => removedIds.Contains(note.Id));
         board.Threads.RemoveAll(thread => removedIds.Contains(thread.From) || removedIds.Contains(thread.To));
@@ -575,6 +610,7 @@ internal sealed class BoardWindow : ResizableWindow
         app.MarkDirty();
         if (!app.Save())
         {
+            app.RestoreArchive(previousArchive);
             foreach (StickyNote note in shifted) note.Slide++;
             board.HorizontalSlideCount = count;
             board.CurrentSlide = previousSlide;
@@ -589,6 +625,7 @@ internal sealed class BoardWindow : ResizableWindow
         foreach (StickyNote note in removed) RemoveNoteView(note);
         LoadSlide();
         RefreshSavedNotes();
+        ShowNotice("Slide deleted · Restore from Version history");
     }
 
     public void ListMoveSlides(StickyNote note, ToolStripMenuItem menu)
@@ -602,6 +639,8 @@ internal sealed class BoardWindow : ResizableWindow
     private void MoveToSlide(StickyNote note, BoardSlide target)
     {
         if (!notes.ContainsKey(note.Id) || !board.HasSlide(target) || note.SlideAddress == target) return;
+        CommitTableEdits();
+        using var edit = EditNote(note, "move card to slide");
         ClearSelectionMode();
         note.SlideAddress = target;
         if (board.CurrentSlide == target) LoadSlide();
@@ -649,6 +688,8 @@ internal sealed class BoardWindow : ResizableWindow
 
     private void AddNewCard(StickyNote note, Point? click = null)
     {
+        CommitTableEdits();
+        using var edit = app.BeginEdit(board, note.ImageFile is not null ? "add image" : note.Table is not null ? "add table" : "add note");
         actions.Visible = false;
         ClearSelectionMode();
         FinishSlideTransition(animate: false);
@@ -702,6 +743,7 @@ internal sealed class BoardWindow : ResizableWindow
         int logicalX = (int)Math.Round(x * 96.0 / DeviceDpi);
         int logicalY = (int)Math.Round(y * 96.0 / DeviceDpi);
         if (note.X == logicalX && note.Y == logicalY) return;
+        using var edit = EditNote(note, "move card");
         note.X = logicalX;
         note.Y = logicalY;
         app.MarkDirty();
@@ -735,6 +777,7 @@ internal sealed class BoardWindow : ResizableWindow
         int width = (int)Math.Round(size.Width * 96.0 / DeviceDpi);
         int height = (int)Math.Round(size.Height * 96.0 / DeviceDpi);
         if (note.CardWidth == width && note.CardHeight == height) return;
+        using var edit = EditNote(note, "resize card");
         note.CardWidth = width;
         note.CardHeight = height;
         canvas.Invalidate();
@@ -758,19 +801,85 @@ internal sealed class BoardWindow : ResizableWindow
             Math.Clamp(wanted.Height, Math.Min(Pixels(minimum.Height), height), height));
     }
 
-    public void ChangeText(StickyNote note, string text, string rtf, NoteCard sender)
+    public void ChangeText(StickyNote note, string text, string rtf, NoteCard sender, bool runTextRules)
     {
         if (note.Text == text && note.FormattedText == rtf) return;
+        bool typing = note.Text != text;
+        bool hasRules = runTextRules && typing && (NoteRules.WholeRule(note, NoteRules.Trigger.TextAdded) is not null
+            || NoteRules.WholeRule(note, NoteRules.Trigger.TextDeleted) is not null
+            || note.TextSelectionRules?.Any(rule => rule.Trigger is NoteRules.Trigger.TextAdded or NoteRules.Trigger.TextDeleted) == true);
+        using var edit = hasRules ? app.BeginEdit(board, "edit note text")
+            : app.BeginEdit(board, typing ? "edit note text" : "format note text", [note], typing ? note : null);
+        NoteRules.TextState? after = hasRules ? ApplyTextChangeRules(note, text, rtf) : null;
+        ChecklistItemRule.TrackEdit(note, text);
+        TextSelectionRule.TrackEdit(note, text);
         note.Text = text;
         note.FormattedText = rtf;
-        RefreshNoteText(note, sender);
+        if (after is { } result) result.Apply(note);
+        RefreshNoteText(note, after.HasValue ? null : sender);
         app.MarkDirty();
     }
 
-    public void ChangeTimestampFormat(StickyNote note, NoteTimestampFormat format)
+    private NoteRules.TextState? ApplyTextChangeRules(StickyNote source, string text, string rtf)
     {
-        if (note.TimestampFormat == format) return;
+        string before = source.Text;
+        int limit = Math.Min(before.Length, text.Length);
+        int first = 0;
+        while (first < limit && before[first] == text[first]) first++;
+        int oldEnd = before.Length, newEnd = text.Length;
+        while (oldEnd > first && newEnd > first && before[oldEnd - 1] == text[newEnd - 1]) { oldEnd--; newEnd--; }
+
+        if (oldEnd > first && !before.AsSpan(first, oldEnd - first).IsWhiteSpace()
+            && Rule(NoteRules.Trigger.TextDeleted, oldEnd) is { Destination: Guid archive } deleted
+            && GetRuleDestination(source, archive) is { } target)
+        {
+            using var oldEditor = new RichTextBox { DetectUrls = false };
+            NoteCard.LoadNoteText(oldEditor, source);
+            if (CorkboardApp.SelectReminderText(oldEditor, first, before[first..oldEnd]))
+            {
+                FormatRuleText(oldEditor, source, deleted);
+                if (AppendSelection(target, oldEditor) is { } archived)
+                {
+                    archived.Apply(target);
+                    RefreshNoteText(target);
+                }
+            }
+        }
+        if (newEnd <= first || text.AsSpan(first, newEnd - first).IsWhiteSpace()
+            || Rule(NoteRules.Trigger.TextAdded, oldEnd) is not { } added || added == new NoteRules.Settings(null)) return null;
+        using var editor = new RichTextBox { DetectUrls = false, Rtf = rtf };
+        if (!CorkboardApp.SelectReminderText(editor, first, text[first..newEnd])) return null;
+        FormatRuleText(editor, source, added);
+        if (added.Destination is Guid id && GetRuleDestination(source, id) is { } destination
+            && AppendSelection(destination, editor) is { } moved)
+        {
+            editor.SelectedText = "";
+            moved.Apply(destination);
+            RefreshNoteText(destination);
+        }
+        return NoteRules.TextState.Read(editor, source);
+
+        NoteRules.Settings? Rule(NoteRules.Trigger trigger, int end) =>
+            source.TextSelectionRules?.FirstOrDefault(rule => rule.Trigger == trigger && first >= rule.Start
+                && end <= rule.Start + (long)rule.Length)?.Settings ?? NoteRules.WholeRule(source, trigger);
+    }
+
+    public void ChangeTimestampFormat(StickyNote note, NoteTimestampFormat format, bool subtle)
+    {
+        if (note.TimestampFormat == format && note.SubtleTimestamps == subtle) return;
+        using var edit = EditNote(note, "change timestamp format");
         note.TimestampFormat = format;
+        note.SubtleTimestamps = subtle;
+        app.MarkDirty();
+    }
+
+    public void ChangeNoteReadingMode(StickyNote note, bool usePages)
+    {
+        if (note.UsePages == usePages) return;
+        using var edit = EditNote(note, "change reading mode");
+        note.UsePages = usePages;
+        if (cards.TryGetValue(note.Id, out NoteCard? card)) card.RefreshReadingMode();
+        if (floating.TryGetValue(note.Id, out FloatingNote? popup)) popup.Card.RefreshReadingMode();
         app.MarkDirty();
     }
 
@@ -794,16 +903,218 @@ internal sealed class BoardWindow : ResizableWindow
         foreach (FloatingNote popup in floating.Values) popup.Card.CommitTableEdit();
     }
 
-    public void EditChecklistReset(StickyNote note, Form owner)
+    public void TrackChecklistToggle(StickyNote note, int line, bool completed)
     {
-        if (ChecklistResetPrompt.Show(owner, note.DailyChecklistReset, out TimeOnly? time))
-            app.SetChecklistReset(note, time);
+        if (ChecklistItemRule.MarkChecked(note, line, completed)) app.UpdateChecklistTimer();
+    }
+
+    public void EditNoteRules(StickyNote source, Form owner, NoteRules.Selection? selection = null, int? checklistLine = null)
+    {
+        NoteRules.Destination[] connected = board.Threads
+            .Where(thread => thread.From == source.Id || thread.To == source.Id)
+            .Select(thread => thread.From == source.Id ? thread.To : thread.From)
+            .Distinct()
+            .Select(id => GetRuleDestination(source, id))
+            .OfType<StickyNote>()
+            .Select(note => new NoteRules.Destination(note.Id, $"{ThreadCaption(note)} · {note.SlideAddress.Name}"))
+            .ToArray();
+        ChecklistItemRule? existingItem = checklistLine is int line ? ChecklistItemRule.At(source, line) : null;
+        NoteRules.Settings? Existing(NoteRules.Trigger trigger) => selection is not { } span ? NoteRules.WholeRule(source, trigger)
+            : trigger == NoteRules.Trigger.Check ? existingItem?.Settings
+            : trigger == NoteRules.Trigger.Uncheck ? existingItem?.Uncheck : FindTextRule(source, span, trigger)?.Settings;
+        if (!NoteRules.Show(owner, connected, source, selection?.Text, checklistLine.HasValue, Existing,
+            out var rules)) return;
+        using var edit = EditNote(source, "change note rules");
+        NoteRules.Settings? choice = rules.GetValueOrDefault(NoteRules.Trigger.Check);
+        NoteRules.Settings? uncheck = rules.GetValueOrDefault(NoteRules.Trigger.Uncheck);
+        if (checklistLine is int item && (existingItem?.Settings != choice || existingItem?.Uncheck != uncheck))
+        {
+            string[] lines = source.Text.Split('\n');
+            int marker = item < lines.Length ? NoteCard.FindChecklistMarker(lines[item], 0) : -1;
+            DateTimeOffset? checkedAt = marker >= 0 && lines[item][marker] == '☑'
+                ? ChecklistItemRule.At(source, item)?.CheckedAt ?? DateTimeOffset.Now : null;
+            ChecklistItemRule.Update(source, item, choice, checkedAt, uncheck, changeUncheck: true);
+        }
+        if (selection is { } text)
+        {
+            foreach (var trigger in Enum.GetValues<NoteRules.Trigger>())
+            {
+                if (trigger is NoteRules.Trigger.Check or NoteRules.Trigger.Uncheck) continue;
+                NoteRules.Settings? rule = rules.GetValueOrDefault(trigger);
+                if (Existing(trigger) != rule) TextSelectionRule.Update(source, text.Offset, text.Text.Length, trigger, rule);
+            }
+        }
+        if (selection is null)
+        {
+            choice ??= new NoteRules.Settings(null);
+            source.CheckedItemDestination = choice.Destination;
+            source.ChecklistResetDelayMinutes = choice.DelayMinutes;
+            app.SetChecklistReset(source, choice.Daily);
+            var checkActions = choice with { Destination = null, Daily = null, DelayMinutes = null };
+            if (checkActions == new NoteRules.Settings(null)) rules.Remove(NoteRules.Trigger.Check);
+            else rules[NoteRules.Trigger.Check] = checkActions;
+            source.ContentRules = rules.Count == 0 ? null : rules;
+        }
+        app.UpdateChecklistTimer();
+        app.MarkDirty();
+    }
+
+    private StickyNote? GetRuleDestination(StickyNote source, Guid id) =>
+        id != source.Id && notes.TryGetValue(id, out StickyNote? target) && target.ImageFile is null && target.Table is null
+        && board.Threads.Any(thread => (thread.From == source.Id && thread.To == id) || (thread.To == source.Id && thread.From == id))
+        ? target : null;
+
+    private static TextSelectionRule? FindTextRule(StickyNote source, NoteRules.Selection span, NoteRules.Trigger trigger) =>
+        source.TextSelectionRules?.FirstOrDefault(rule => rule.Trigger == trigger && rule.Start == span.Offset && rule.Length == span.Text.Length);
+
+    public static NoteRules.Settings? ResolveContentRule(StickyNote source, NoteRules.Trigger trigger,
+        NoteRules.Selection active, string nativeText)
+    {
+        ChecklistItemRule? item = trigger is NoteRules.Trigger.Check or NoteRules.Trigger.Uncheck
+            ? ChecklistItemRule.At(source, ChecklistItemRule.LineAt(nativeText, active.NativeStart)) : null;
+        return (trigger switch
+        {
+            NoteRules.Trigger.Check => item?.Settings,
+            NoteRules.Trigger.Uncheck => item?.Uncheck,
+            _ => FindTextRule(source, active, trigger)?.Settings
+        }) ?? NoteRules.WholeRule(source, trigger);
+    }
+
+    public bool TryApplyContentRule(StickyNote source, RichTextBox editor, NoteRules.Selection active,
+        NoteRules.Settings rule, Action<Action> editText, Action<RichTextBox>? applyTrigger = null,
+        bool removeItemLine = false)
+    {
+        if (rule == new NoteRules.Settings(null)) return false;
+        StickyNote? target = rule.Destination is Guid id ? GetRuleDestination(source, id) : null;
+        if (rule.Destination.HasValue && target is null) ShowNotice("Note rule paused · reconnect its destination");
+
+        void Format(RichTextBox box)
+        {
+            box.Select(active.NativeStart, active.NativeEnd - active.NativeStart);
+            applyTrigger?.Invoke(box);
+            FormatRuleText(box, source, rule);
+        }
+
+        if (target is null)
+        {
+            if (!rule.Bold && !rule.Italic && !rule.Underline && !rule.Strike && !rule.Timestamp) return false;
+            using var edit = EditNote(source, "apply note rule");
+            editText(() => Format(editor));
+            return true;
+        }
+        using var edited = new RichTextBox { DetectUrls = false, Rtf = editor.Rtf };
+        Format(edited);
+        if (AppendSelection(target, edited) is { } appended)
+        {
+            int? itemLine = null;
+            if (removeItemLine)
+            {
+                itemLine = ChecklistItemRule.LineAt(edited.Text, active.NativeStart);
+                RemoveChecklistLine(edited, active.NativeStart);
+            }
+            else edited.SelectedText = "";
+            RecordRuleMove(source, target, NoteRules.TextState.Read(edited, source, itemLine), appended);
+            return true;
+        }
+        ShowNotice("Couldn’t move selection · it stayed in this note");
+        using var fallback = EditNote(source, "apply note rule");
+        editText(() => Format(editor));
+        return true;
+    }
+
+    internal static void FormatRuleText(RichTextBox box, StickyNote note, NoteRules.Settings rule)
+    {
+        if (rule.Strike) NoteCard.SetFormat(box, NoteCard.Strikeout, true);
+        if (rule.Bold) NoteCard.SetFormat(box, NoteCard.Bold, true);
+        if (rule.Italic) NoteCard.SetFormat(box, 2, true);
+        if (rule.Underline) NoteCard.SetFormat(box, 4, true);
+        if (!rule.Timestamp) return;
+        int start = box.SelectionStart, end = start + box.SelectionLength;
+        string stamp = $" · {NoteTimestamp.Format(DateTime.Now, note.TimestampFormat)}";
+        Color paper = BoardStyle.Colors[Math.Clamp(note.Color, 0, BoardStyle.Colors.Length - 1)].Paper;
+        box.Select(end, 0);
+        NoteLinks.InsertPlainText(box, stamp, !note.SubtleTimestamps,
+            note.SubtleTimestamps ? TextSizePrompt.TextInk(paper, 65) : null);
+        box.Select(start, end - start + stamp.Length);
+    }
+
+    public bool TryMoveCheckedItem(StickyNote source, int marker, Guid id)
+    {
+        if (GetRuleDestination(source, id) is not StickyNote target)
+        {
+            ShowNotice("Note rule paused · reconnect its destination");
+            return false;
+        }
+        using var from = new RichTextBox { DetectUrls = false };
+        NoteCard.LoadNoteText(from, source);
+        string original = from.Text;
+        if (marker < 0 || marker >= original.Length || original[marker] != '☐' || !NoteCard.IsChecklistItem(original, marker))
+            return false;
+        int end = NoteCard.LineEnd(original, marker);
+        NoteCard.SetChecklistState(from, marker, end, complete: true);
+        from.Select(marker, end - marker);
+        int itemLine = ChecklistItemRule.LineAt(original, marker);
+        NoteRules.Settings sourceRule = ChecklistItemRule.GetSettings(source, itemLine);
+        FormatRuleText(from, source, sourceRule);
+        if (AppendSelection(target, from) is not NoteRules.TextState targetAfter)
+        {
+            ShowNotice("Couldn’t move item · it stayed in this note");
+            return false;
+        }
+        RemoveChecklistLine(from, marker);
+        int targetLine = ChecklistItemRule.LineAt(target.Text, target.Text.Length);
+        if (target.Text.Length > 0 && !target.Text.EndsWith('\n')) targetLine++;
+        var scheduled = new StickyNote { ChecklistItems = targetAfter.Checklist, DailyChecklistReset = target.DailyChecklistReset,
+            ChecklistResetDelayMinutes = target.ChecklistResetDelayMinutes };
+        if (sourceRule.Daily.HasValue || sourceRule.DelayMinutes.HasValue)
+            ChecklistItemRule.Update(scheduled, targetLine, new NoteRules.Settings(null, sourceRule.Daily, sourceRule.DelayMinutes), DateTimeOffset.Now);
+        else ChecklistItemRule.MarkChecked(scheduled, targetLine, true);
+        RecordRuleMove(source, target, NoteRules.TextState.Read(from, source, itemLine), targetAfter with { Checklist = scheduled.ChecklistItems });
+        return true;
+    }
+
+    private static void RemoveChecklistLine(RichTextBox editor, int marker)
+    {
+        string text = editor.Text;
+        marker = NoteCard.LineStart(text, marker);
+        int end = NoteCard.LineEnd(text, marker);
+        int start = end == text.Length && marker > 0 ? marker - 1 : marker;
+        int limit = end < text.Length ? end + 1 : end;
+        editor.Select(start, limit - start);
+        editor.SelectedText = "";
+    }
+
+    internal static NoteRules.TextState? AppendSelection(StickyNote target, RichTextBox source)
+    {
+        using var to = new RichTextBox { DetectUrls = false };
+        NoteCard.LoadNoteText(to, target);
+        string expectedItem = NoteParagraphs.RemoveDividerMarkers(NoteLinks.SelectedDisplayText(source));
+        bool needsNewline = target.Text.Length > 0 && !target.Text.EndsWith('\n');
+        to.Select(to.TextLength, 0);
+        if (needsNewline) NoteLinks.InsertPlainText(to, "\n");
+        to.SelectedRtf = source.SelectedRtf;
+        NoteRules.TextState result = NoteRules.TextState.Read(to, target);
+        string expected = target.Text + (needsNewline ? "\n" : "") + expectedItem;
+        return expectedItem.Length > 0 && result.Text.TrimEnd('\n') == expected.TrimEnd('\n') ? result : null;
+    }
+
+    private void RecordRuleMove(StickyNote source, StickyNote target, NoteRules.TextState sourceAfter, NoteRules.TextState targetAfter)
+    {
+        using var edit = app.BeginEdit(board, "rule move", [source, target]);
+        sourceAfter.Apply(source);
+        targetAfter.Apply(target);
+        RefreshNoteText(source);
+        RefreshNoteText(target);
+        app.UpdateChecklistTimer();
+        app.MarkDirty();
+        ShowNotice($"Moved to {ThreadCaption(target)} · Ctrl+Z to undo");
     }
 
     public void EditLabel(StickyNote note, Form owner)
     {
         string? label = NamePrompt.Show(owner, "Label note", "Category or label", note.Label, 45);
         if (label is null || label == note.Label) return;
+        using var edit = EditNote(note, "edit card label");
         note.Label = label;
         if (cards.TryGetValue(note.Id, out NoteCard? card)) card.RefreshLabel();
         if (floating.TryGetValue(note.Id, out FloatingNote? popup))
@@ -818,6 +1129,7 @@ internal sealed class BoardWindow : ResizableWindow
     public void ChangeColor(StickyNote note, int color)
     {
         if (note.Color == color) return;
+        using var edit = EditNote(note, "change card color");
         note.Color = color;
         if (cards.TryGetValue(note.Id, out NoteCard? card)) card.ApplyColor();
         if (floating.TryGetValue(note.Id, out FloatingNote? popup)) popup.ApplyColor(color);
@@ -828,6 +1140,7 @@ internal sealed class BoardWindow : ResizableWindow
     public void ChangePinColor(StickyNote note, int? color)
     {
         if (note.PinColor == color) return;
+        using var edit = EditNote(note, "change pin color");
         note.PinColor = color;
         if (cards.TryGetValue(note.Id, out NoteCard? card)) card.RefreshPin();
         app.MarkDirty();
@@ -836,6 +1149,7 @@ internal sealed class BoardWindow : ResizableWindow
     public void SetPinned(StickyNote note, bool pinned)
     {
         if (note.Pinned == pinned) return;
+        using var edit = pinned ? EditNote(note, "pin card") : app.BeginEdit(board, "unpin card");
         note.Pinned = pinned;
         if (cards.TryGetValue(note.Id, out NoteCard? card)) card.RefreshPin();
         if (!pinned)
@@ -856,6 +1170,7 @@ internal sealed class BoardWindow : ResizableWindow
             bool added = !board.Threads.Any(thread => thread.From == source && thread.To == note.Id || thread.From == note.Id && thread.To == source);
             if (added)
             {
+                using var edit = app.BeginEdit(board, "add thread");
                 FinishThreadReveal();
                 SetPinned(note, true);
                 board.Threads.Add(new NoteThread { From = source, To = note.Id });
@@ -923,21 +1238,24 @@ internal sealed class BoardWindow : ResizableWindow
 
     public void PopOut(StickyNote note)
     {
+        using var edit = EditNote(note, "pop out card");
         if (!note.PoppedOut) { note.PoppedOut = true; app.MarkDirty(); }
         OpenFloating(note, true);
     }
 
     public void ToggleAlwaysOnTop(StickyNote note)
     {
+        using var edit = EditNote(note, "change always on top");
         note.AlwaysOnTop = !note.PoppedOut || !note.AlwaysOnTop;
         PopOut(note);
         floating[note.Id].TopMost = note.AlwaysOnTop;
         app.MarkDirty();
     }
 
-    public void SavePopupBounds(StickyNote note, Rectangle bounds)
+    public void SavePopupBounds(StickyNote note, Rectangle bounds, bool record)
     {
         if (closing || bounds == note.PopupBounds) return;
+        using var edit = record ? EditNote(note, "move or resize floating card") : null;
         note.PopupBounds = bounds;
         app.MarkDirty();
     }
@@ -956,6 +1274,45 @@ internal sealed class BoardWindow : ResizableWindow
         if (images.Remove(note.Id, out Image? image)) image?.Dispose();
         UpdateEmptyState();
         canvas.Invalidate();
+    }
+
+    internal void RefreshFromHistory(Guid[] affected, bool slides)
+    {
+        ClearSelectionMode();
+        FinishCardEntrance();
+        FinishThreadReveal();
+        foreach (Guid id in affected)
+        {
+            StickyNote? current = board.Notes.Find(note => note.Id == id);
+            if (current is null)
+            {
+                if (notes.TryGetValue(id, out StickyNote? removed)) RemoveNoteView(removed);
+                continue;
+            }
+            notes[id] = current;
+            if (floating.TryGetValue(id, out FloatingNote? popup))
+            {
+                if (!current.PoppedOut) popup.Close();
+                else popup.RefreshFromHistory();
+            }
+            else if (current.PoppedOut) OpenFloating(current, false);
+        }
+        if (slides || slideMotion.Enabled) LoadSlide();
+        else
+        {
+            foreach (Guid id in affected)
+            {
+                if (!notes.TryGetValue(id, out StickyNote? note) || note.SlideAddress != board.CurrentSlide) continue;
+                if (!cards.TryGetValue(id, out NoteCard? card)) AddCard(note);
+                else
+                {
+                    card.Bounds = PreferredCardBounds(note);
+                    card.RefreshFromHistory();
+                }
+            }
+            UpdateEmptyState();
+            canvas.Invalidate();
+        }
     }
 
     public void RefreshBoardList()
@@ -996,55 +1353,61 @@ internal sealed class BoardWindow : ResizableWindow
         finally { hiding = false; }
     }
 
-    private Panel BuildActions()
+    private BoardActionMenu BuildActions()
     {
-        var panel = new Panel { BackColor = BoardStyle.Paper, Visible = false };
-        var stack = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false, Padding = new Padding(8) };
-        Add("＋  Add note", () => AddNote());
-        Add("▧  Add image…", () => ChooseImage());
-        Add("▤  Add table", () => AddTable());
-        Add("●  Add pin", () => { actions.Visible = false; ClearSelectionMode(); selectPin = true; ShowNotice("Click a pin · Esc to cancel", true); });
-        Add("≡  Corkboards", () => { actions.Visible = false; AnimateDrawer(true); });
+        var panel = new BoardActionMenu();
+        Add("Add note", "＋", () => AddNote());
+        Add("Add image…", "▧", () => ChooseImage());
+        Add("Add table", "▤", () => AddTable());
+        Add("Add pin", "●", () => { actions.Visible = false; ClearSelectionMode(); selectPin = true; ShowNotice("Click a pin · Esc to cancel", true); });
+        Add("Corkboards", "≡", () => { actions.Visible = false; AnimateDrawer(true); });
         Separator();
-        Add("−  Minimize to tray", MinimizeBoard);
-        Add("□  Maximize / restore", () =>
+        Button undo = Add("Undo", "↶", () => { actions.Visible = false; StepHistory(false); });
+        Button redo = Add("Redo", "↷", () => { actions.Visible = false; StepHistory(true); });
+        Add("Version history…", "◷", () => { actions.Visible = false; app.ShowVersionHistory(this, board); });
+        Separator();
+        Add("Minimize to tray", "−", MinimizeBoard);
+        Add("Maximize / restore", "□", () =>
         {
             actions.Visible = false;
             MaximizedBounds = Screen.FromControl(this).WorkingArea;
             WindowState = WindowState == FormWindowState.Maximized ? FormWindowState.Normal : FormWindowState.Maximized;
         });
-        Button startup = Add("Start with Windows", () =>
+        BoardActionButton startup = Add("Start with Windows", "↥", () =>
         {
-            try { Startup.SetEnabled(!Startup.IsEnabled()); }
+            try { app.ToggleStartup(); }
             catch (Exception error) when (error is UnauthorizedAccessException or System.Security.SecurityException or IOException)
             { ShowNotice("Windows couldn’t change the startup setting."); }
         });
+        startup.ShowStartupState(false);
         startup.Click += (_, _) => UpdateStartupLabel();
-        Add("×  Close board", Close);
+        Add("Close board", "×", Close);
         Separator();
-        Add("Exit Corkboard", app.Exit);
-        panel.VisibleChanged += (_, _) => { if (panel.Visible) UpdateStartupLabel(); };
-        panel.Controls.Add(stack);
+        Add("Exit Corkboard", "⏻", app.Exit);
+        panel.VisibleChanged += (_, _) =>
+        {
+            if (!panel.Visible) return;
+            UpdateStartupLabel();
+            undo.Enabled = UndoLabel is not null;
+            redo.Enabled = RedoLabel is not null;
+            tips.SetToolTip(undo, UndoLabel is { } undoLabel ? $"Undo {undoLabel} (Ctrl+Z)" : "Ctrl+Z");
+            tips.SetToolTip(redo, RedoLabel is { } redoLabel ? $"Redo {redoLabel} (Ctrl+Y)" : "Ctrl+Y");
+        };
         return panel;
 
-        Button Add(string text, Action action)
+        BoardActionButton Add(string text, string glyph, Action action)
         {
-            Button button = BoardStyle.Button(text, BoardStyle.Paper, BoardStyle.Ink);
-            button.Size = new Size(186, 30);
-            button.TextAlign = ContentAlignment.MiddleLeft;
-            button.Padding = new Padding(8, 0, 4, 0);
+            var button = new BoardActionButton(text, glyph);
             button.Click += (_, _) => action();
-            stack.Controls.Add(button);
+            panel.Controls.Add(button);
             return button;
         }
-        void Separator()
-        {
-            var line = new Panel { Size = new Size(166, 1), BackColor = BoardStyle.PanelTint, Margin = new Padding(10, 4, 0, 4), TabStop = false };
-            stack.Controls.Add(line);
-        }
+
+        void Separator() => panel.Controls.Add(new Panel { BackColor = BoardStyle.PanelTint, TabStop = false });
+
         void UpdateStartupLabel()
         {
-            try { startup.Text = Startup.IsEnabled() ? "✓  Start with Windows" : "○  Start with Windows"; }
+            try { startup.ShowStartupState(Startup.IsEnabled()); }
             catch (Exception error) when (error is UnauthorizedAccessException or System.Security.SecurityException or IOException)
             { startup.Enabled = false; }
         }
@@ -1185,14 +1548,17 @@ internal sealed class BoardWindow : ResizableWindow
         fab.Location = new Point(inset + Pixels(6), Pixels(8));
         int navigationWidth = Pixels(132);
         slideControls.Bounds = new Rectangle(corkViewport.Right - Pixels(6) - navigationWidth, Pixels(8), navigationWidth, Pixels(22));
+        bell.Bounds = new Rectangle(slideControls.Left - Pixels(34), slideControls.Top, Pixels(28), slideControls.Height);
+        BoardStyle.RoundCorners(bell, Pixels(9));
         BoardStyle.RoundCorners(slideControls, Pixels(11));
         previousSlide.Bounds = new Rectangle(Pixels(4), Pixels(1), Pixels(22), Pixels(20));
         slideCounter.Bounds = new Rectangle(Pixels(26), Pixels(1), Pixels(56), Pixels(20));
         nextSlide.Bounds = new Rectangle(Pixels(82), Pixels(1), Pixels(22), Pixels(20));
         addSlide.Bounds = new Rectangle(Pixels(104), Pixels(1), Pixels(24), Pixels(20));
         RefreshMenuButton();
-        actions.Bounds = new Rectangle(fab.Left, corkViewport.Top + Pixels(4), Pixels(202), Pixels(334));
-        BoardStyle.RoundCorners(actions, Pixels(8));
+        int menuTop = corkViewport.Top + Pixels(4);
+        actions.Fit(Rectangle.FromLTRB(fab.Left, menuTop,
+            Math.Max(fab.Left, corkViewport.Right - Pixels(6)), Math.Max(menuTop, corkViewport.Bottom - Pixels(6))));
         drawerClip.Location = new Point(fab.Left, corkViewport.Top + Pixels(4));
         drawerClip.Height = Math.Max(0, corkViewport.Bottom - drawerClip.Top - Pixels(9));
         drawer.Size = new Size(DrawerWidth, drawerClip.Height);
@@ -1247,6 +1613,30 @@ internal sealed class BoardWindow : ResizableWindow
         {
             for (int row = -1; row <= 1; row++)
                 e.Graphics.DrawLine(line, centerX - stroke, centerY + row * stroke, centerX + stroke, centerY + row * stroke);
+        }
+    }
+
+    private void RefreshBell()
+    {
+        int count = app.Reminders.Unfinished;
+        bell.AccessibleDescription = count == 0 ? "Open notifications and scheduled reminders" : $"{count} unfinished reminders";
+        bell.Invalidate();
+    }
+
+    private void PaintBell(object? sender, PaintEventArgs e)
+    {
+        e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+        e.Graphics.TranslateTransform(bell.Width / 2f, bell.Height / 2f);
+        float scale = DeviceDpi / 96f;
+        e.Graphics.ScaleTransform(scale, scale);
+        using var line = new Pen(BoardStyle.Ink, 1.2f);
+        e.Graphics.DrawArc(line, -4, -6, 8, 8, 180, 180);
+        e.Graphics.DrawLines(line, new Point[] { new(-4, -2), new(-5, 4), new(5, 4), new(4, -2) });
+        e.Graphics.DrawArc(line, -1.5f, 4, 3, 2, 0, 180);
+        if (app.Reminders.Unfinished > 0)
+        {
+            using var dot = new SolidBrush(BoardStyle.Brick);
+            e.Graphics.FillEllipse(dot, 4, -8, 5, 5);
         }
     }
 
@@ -1331,7 +1721,8 @@ internal sealed class BoardWindow : ResizableWindow
             window.FormClosed += (_, _) =>
             {
                 floating.Remove(note.Id);
-                if (closing) return;
+                if (closing || !board.Notes.Contains(note) || !note.PoppedOut) return;
+                using var edit = EditNote(note, "return card to board");
                 if (!cards.ContainsKey(note.Id) && images.Remove(note.Id, out Image? image)) image?.Dispose();
                 note.PoppedOut = false;
                 app.MarkDirty();
@@ -1401,7 +1792,13 @@ internal sealed class BoardWindow : ResizableWindow
         threadMenu.Items.Add(new ToolStripSeparator());
         AddThreadColors(threadMenu.Items, thread);
         threadMenu.Items.Add(new ToolStripSeparator());
-        threadMenu.Items.Add("Remove thread", null, (_, _) => { board.Threads.Remove(thread); canvas.Invalidate(); app.MarkDirty(); });
+        threadMenu.Items.Add("Remove thread", null, (_, _) =>
+        {
+            using var edit = app.BeginEdit(board, "remove thread");
+            board.Threads.Remove(thread);
+            canvas.Invalidate();
+            app.MarkDirty();
+        });
         threadMenu.Show(canvas, e.Location);
     }
 
@@ -1423,6 +1820,7 @@ internal sealed class BoardWindow : ResizableWindow
     private void SetThreadColor(NoteThread thread, int? color)
     {
         if (thread.Color == color) return;
+        using var edit = app.BeginEdit(board, "change thread color");
         thread.Color = color;
         canvas.Invalidate();
         app.MarkDirty();
@@ -1533,12 +1931,23 @@ internal sealed class BoardWindow : ResizableWindow
         Rectangle.FromLTRB(Math.Min(from.X, to.X), Math.Min(from.Y, to.Y), Math.Max(from.X, to.X) + 1, Math.Max(from.Y, to.Y) + 1),
         Pixels(4), Pixels(4));
 
-    internal void RememberBounds()
+    internal void RememberBounds(bool record = false)
     {
         TrackNormalBounds();
         if (!initialized || (hiddenBounds ?? lastNormalBounds) is not Rectangle wanted || board.Bounds == wanted) return;
+        Rectangle before = board.Bounds ?? Bounds;
         board.Bounds = wanted;
         app.MarkDirty();
+        if (record && before != wanted)
+            app.RecordEdit("move or resize board", () => app.RestoreBoardBounds(board, before), () => app.RestoreBoardBounds(board, wanted));
+    }
+
+    internal void RestoreSavedBounds(Rectangle bounds)
+    {
+        Rectangle fitted = FitOnScreen(bounds, MinimumSize, Screen.FromRectangle(bounds));
+        if (hiddenBounds.HasValue) hiddenBounds = fitted;
+        else if (WindowState == FormWindowState.Normal) Bounds = fitted;
+        lastNormalBounds = fitted;
     }
 
     private void TrackNormalBounds()
@@ -1564,7 +1973,10 @@ internal sealed class BoardWindow : ResizableWindow
             if (message.Msg == mouseMove)
             {
                 window.UpdateThreadPointer(location);
-                return false;
+                if (control != window.canvas && !window.canvas.Contains(control)) return false;
+                if (window.slideMotion.Enabled) return false;
+                Cursor.Current = window.threadTarget is null ? Cursors.Cross : Cursors.Hand;
+                return true;
             }
             if (control != window.canvas && !window.canvas.Contains(control))
             {

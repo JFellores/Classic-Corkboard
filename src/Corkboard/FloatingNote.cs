@@ -4,12 +4,16 @@ internal sealed class FloatingNote : ResizableWindow
 {
     private readonly bool activate;
     private readonly bool photo;
+    private readonly BoardWindow board;
+    private readonly StickyNote note;
     private readonly CorkMenu actions = new();
     private readonly Panel footer = new() { Dock = DockStyle.Bottom, Height = 41, Padding = new Padding(8, 5, 8, 6) };
     public NoteCard Card { get; }
 
     public FloatingNote(BoardWindow board, StickyNote note, Icon icon, bool activate, Image? image = null)
     {
+        this.board = board;
+        this.note = note;
         this.activate = activate;
         photo = note.ImageFile is not null;
         Icon = icon;
@@ -43,16 +47,29 @@ internal sealed class FloatingNote : ResizableWindow
         footer.Controls.Add(fab);
         Controls.Add(footer);
         ApplyColor(note.Color);
-        ResizeEnd += (_, _) => SaveBounds();
-        Shown += (_, _) => SaveBounds();
+        ResizeEnd += (_, _) => SaveBounds(record: true);
+        Shown += (_, _) => SaveBounds(record: false);
 
-        void SaveBounds()
+        void SaveBounds(bool record)
         {
-            if (WindowState == FormWindowState.Normal) board.SavePopupBounds(note, Bounds);
+            if (WindowState == FormWindowState.Normal) board.SavePopupBounds(note, Bounds, record);
         }
     }
 
     protected override bool ShowWithoutActivation => !activate;
+
+    protected override bool ProcessCmdKey(ref Message msg, Keys keys) =>
+        board.HandleHistoryKey(keys, this) || base.ProcessCmdKey(ref msg, keys);
+
+    public void RefreshFromHistory()
+    {
+        Text = string.IsNullOrWhiteSpace(note.Label) ? (note.Table is null ? "Sticky note" : "Table") : note.Label;
+        TopMost = note.AlwaysOnTop;
+        if (note.PopupBounds is Rectangle bounds && WindowState == FormWindowState.Normal && Bounds != bounds)
+            Bounds = FitOnScreen(bounds, MinimumSize, Screen.FromRectangle(bounds));
+        ApplyColor(note.Color);
+        Card.RefreshFromHistory();
+    }
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {

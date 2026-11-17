@@ -1,5 +1,4 @@
 using System.Drawing.Drawing2D;
-using System.Globalization;
 
 namespace Corkboard;
 
@@ -283,19 +282,13 @@ internal static class NamePrompt
 
 internal static class NoteLinkPrompt
 {
-    private static readonly (string Name, Color Color)[] Colors =
-    [
-        ("Black", BoardStyle.Ink), ("Red", Color.FromArgb(163, 39, 51)), ("Blue", Color.FromArgb(48, 71, 174)),
-        ("Green", Color.FromArgb(27, 105, 60)), ("Purple", Color.FromArgb(120, 57, 142))
-    ];
-
     public static (string Alias, Uri Destination, Color Color)? Show(IWin32Window owner, string selection)
     {
         using var dialog = new CorkDialog("Insert link", 264);
         using var swatchTips = new ToolTip();
         string initialText = selection.Length <= 160 && !selection.Any(char.IsControl) ? selection : "";
         TextBox display = AddField("Text to display", "Video Link", initialText, 160, 55);
-        Color selectedColor = Colors[0].Color;
+        Color selectedColor = BoardStyle.TextColors[0].Color;
         display.ForeColor = selectedColor;
         var palette = new Panel { Bounds = new Rectangle(196, 52, 154, 23), AccessibleName = "Link color" };
         palette.Controls.Add(new Label
@@ -303,9 +296,9 @@ internal static class NoteLinkPrompt
             Text = "Color", ForeColor = BoardStyle.Muted,
             TextAlign = ContentAlignment.MiddleLeft, Bounds = new Rectangle(0, 0, 43, 23)
         });
-        for (int i = 0; i < Colors.Length; i++)
+        for (int i = 0; i < BoardStyle.TextColors.Length; i++)
         {
-            (string name, Color color) = Colors[i];
+            (string name, Color color) = BoardStyle.TextColors[i];
             var swatch = new RadioButton
             {
                 Appearance = Appearance.Button, FlatStyle = FlatStyle.Flat, UseVisualStyleBackColor = false,
@@ -314,7 +307,7 @@ internal static class NoteLinkPrompt
             };
             swatch.FlatAppearance.BorderSize = 0;
             swatch.FlatAppearance.CheckedBackColor = BoardStyle.Paper;
-            swatch.Paint += PaintSwatch;
+            swatch.Paint += BoardStyle.PaintColorSwatch;
             swatch.CheckedChanged += (_, _) =>
             {
                 if (swatch.Checked) display.ForeColor = selectedColor = color;
@@ -375,128 +368,42 @@ internal static class NoteLinkPrompt
         }
     }
 
-    private static void PaintSwatch(object? sender, PaintEventArgs e)
-    {
-        if (sender is not RadioButton swatch) return;
-        int size = swatch.LogicalToDeviceUnits(13);
-        var dot = new Rectangle((swatch.Width - size) / 2, (swatch.Height - size) / 2, size, size);
-        e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-        using var fill = new SolidBrush(swatch.ForeColor);
-        e.Graphics.FillEllipse(fill, dot);
-        if (!swatch.Checked) return;
-        int gap = swatch.LogicalToDeviceUnits(2);
-        using var outline = new Pen(swatch.ForeColor, swatch.LogicalToDeviceUnits(1));
-        e.Graphics.DrawEllipse(outline, Rectangle.Inflate(dot, gap, gap));
-    }
-}
-
-internal static class ChecklistResetPrompt
-{
-    private static readonly string[] TimeFormats = ["HH:mm", "H:mm"];
-
-    public static bool Show(IWin32Window owner, TimeOnly? current, out TimeOnly? time)
-    {
-        using var dialog = new CorkDialog("Daily checklist reset", 278);
-        var description = new Label
-        {
-            Text = "Unchecks completed items on this note.",
-            ForeColor = BoardStyle.Muted, Bounds = new Rectangle(22, 53, 328, 22)
-        };
-        var settings = new Panel
-        {
-            Bounds = new Rectangle(22, 83, 328, 113),
-            BackColor = Color.FromArgb(245, 235, 219)
-        };
-        settings.Resize += (_, _) => BoardStyle.RoundCorners(settings, settings.LogicalToDeviceUnits(10));
-        BoardStyle.RoundCorners(settings, 10);
-
-        var scheduleLabel = new Label
-        {
-            Text = "Reset every day", Bounds = new Rectangle(14, 9, 224, 35),
-            TextAlign = ContentAlignment.MiddleLeft
-        };
-        var enabled = new CheckBox
-        {
-            AccessibleName = "Reset every day", Checked = current.HasValue,
-            Appearance = Appearance.Button, FlatStyle = FlatStyle.Flat, UseVisualStyleBackColor = false,
-            TextAlign = ContentAlignment.MiddleCenter, Cursor = Cursors.Hand,
-            Bounds = new Rectangle(252, 10, 62, 32)
-        };
-        enabled.FlatAppearance.BorderSize = 0;
-        enabled.Resize += (_, _) => BoardStyle.RoundCorners(enabled, enabled.LogicalToDeviceUnits(16));
-        BoardStyle.RoundCorners(enabled, 16);
-        scheduleLabel.Cursor = Cursors.Hand;
-        scheduleLabel.Click += (_, _) =>
-        {
-            enabled.Focus();
-            enabled.Checked = !enabled.Checked;
-        };
-        var divider = new Panel
-        {
-            BackColor = BoardStyle.PanelTint, Bounds = new Rectangle(14, 52, 300, 1)
-        };
-        var timeLabel = new Label { Text = "Reset time", Bounds = new Rectangle(14, 63, 178, 22) };
-        var formatLabel = new Label
-        {
-            Text = "Local time · 24-hour", ForeColor = BoardStyle.Muted,
-            Bounds = new Rectangle(14, 84, 178, 21)
-        };
-        var timeField = new Panel { Bounds = new Rectangle(215, 65, 99, 36) };
-        timeField.Resize += (_, _) => BoardStyle.RoundCorners(timeField, timeField.LogicalToDeviceUnits(7));
-        BoardStyle.RoundCorners(timeField, 7);
-        using var timeFont = new Font("Segoe UI Semibold", 13F);
-        var entry = new TextBox
-        {
-            AccessibleName = "Daily reset time, 24-hour local time",
-            Text = (current ?? TimeOnly.MinValue).ToString("HH:mm", CultureInfo.InvariantCulture),
-            TextAlign = HorizontalAlignment.Center, BorderStyle = BorderStyle.None, MaxLength = 5, Font = timeFont,
-            Bounds = new Rectangle(5, 6, 89, 24)
-        };
-        timeField.Controls.Add(entry);
-        timeField.Click += (_, _) => entry.Focus();
-        var validation = new Label { Bounds = new Rectangle(22, 200, 328, 23), ForeColor = BoardStyle.Brick };
-        settings.Controls.AddRange([scheduleLabel, enabled, divider, timeLabel, formatLabel, timeField]);
-        dialog.Controls.AddRange([description, settings, validation]);
-        dialog.AddActions("Save", acceptWithEnter: true);
-        var save = (Button)dialog.AcceptButton!;
-
-        bool TryRead(out TimeOnly result) => TimeOnly.TryParseExact(entry.Text, TimeFormats,
-            CultureInfo.InvariantCulture, DateTimeStyles.None, out result);
-
-        void UpdateState()
-        {
-            bool on = enabled.Checked;
-            enabled.Text = on ? "On" : "Off";
-            enabled.ForeColor = on ? Color.White : BoardStyle.Ink;
-            enabled.BackColor = on ? BoardStyle.Brick : BoardStyle.PanelTint;
-            enabled.FlatAppearance.CheckedBackColor = enabled.BackColor;
-            timeLabel.ForeColor = on ? BoardStyle.Ink : BoardStyle.Muted;
-            entry.Enabled = on;
-            entry.BackColor = timeField.BackColor = on ? Color.White : BoardStyle.Paper;
-            save.Enabled = !on || TryRead(out _);
-            validation.Text = save.Enabled ? "" : "Enter a time from 00:00 to 23:59.";
-        }
-
-        enabled.CheckedChanged += (_, _) => UpdateState();
-        entry.TextChanged += (_, _) => UpdateState();
-        dialog.Shown += (_, _) =>
-        {
-            if (enabled.Checked) { entry.Focus(); entry.SelectAll(); }
-            else enabled.Focus();
-        };
-        UpdateState();
-        bool saved = dialog.ShowDialog(owner) == DialogResult.OK;
-        time = saved && enabled.Checked && TryRead(out TimeOnly chosen) ? chosen : null;
-        return saved;
-    }
 }
 
 internal static class TextSizePrompt
 {
-    public static int? Show(IWin32Window owner, int current, int maximum, Font noteFont, Color notePaper)
+    private const int MinimumOpacity = 25;
+
+    public static Color TextInk(Color paper, int opacity) => TextInk(BoardStyle.Ink, paper, opacity);
+
+    private static Color TextInk(Color ink, Color paper, int opacity) => Color.FromArgb(
+        (ink.R * opacity + paper.R * (100 - opacity)) / 100,
+        (ink.G * opacity + paper.G * (100 - opacity)) / 100,
+        (ink.B * opacity + paper.B * (100 - opacity)) / 100);
+
+    public static (int? Size, Color? Ink, string? Family)? Show(IWin32Window owner, int? current, int maximum,
+        Font noteFont, string? currentFamily, Color notePaper, Color currentInk)
     {
-        using var dialog = new CorkDialog("Text size", 242);
-        var stepper = new Panel { Bounds = new Rectangle(22, 59, 138, 36), BackColor = Color.White };
+        using var dialog = new CorkDialog("Text appearance", 395);
+        using var swatchTips = new ToolTip();
+        using var installedFonts = new System.Drawing.Text.InstalledFontCollection();
+        int defaultSize = Math.Clamp((int)Math.Round(noteFont.SizeInPoints), 1, maximum);
+        var familyLabel = new Label { Text = "Font", Bounds = new Rectangle(22, 58, 80, 25) };
+        var family = new ComboBox
+        {
+            AccessibleName = "Font family", DropDownStyle = ComboBoxStyle.DropDownList, FlatStyle = FlatStyle.Flat,
+            Bounds = new Rectangle(112, 56, 238, 28), MaxDropDownItems = 12
+        };
+        string[] available = installedFonts.Families.Select(font => font.Name).Where(name => name.Length < 32)
+            .Distinct(StringComparer.CurrentCultureIgnoreCase).Order(StringComparer.CurrentCultureIgnoreCase).ToArray();
+        family.Items.Add("Keep current");
+        family.Items.AddRange(available);
+        family.SelectedIndex = 0;
+        if (currentFamily is string selected && family.Items.IndexOf(selected) is int index && index > 0)
+            family.SelectedIndex = index;
+        int originalFamily = family.SelectedIndex;
+        var sizeLabel = new Label { Text = "Size", Bounds = new Rectangle(22, 103, 78, 30), TextAlign = ContentAlignment.MiddleLeft };
+        var stepper = new Panel { Bounds = new Rectangle(112, 100, 138, 36), BackColor = Color.White };
         BoardStyle.RoundCorners(stepper, 7);
         Button minus = BoardStyle.Button("−", BoardStyle.PanelTint, BoardStyle.Ink);
         minus.AccessibleName = "Decrease text size";
@@ -507,7 +414,8 @@ internal static class TextSizePrompt
         var entry = new TextBox
         {
             Bounds = new Rectangle(39, 8, 40, 21), TextAlign = HorizontalAlignment.Center,
-            BorderStyle = BorderStyle.None, MaxLength = 2, Text = current.ToString(),
+            BorderStyle = BorderStyle.None, MaxLength = 2, Text = current?.ToString() ?? "",
+            PlaceholderText = "Mixed",
             AccessibleName = "Text size in points", BackColor = Color.White
         };
         var unit = new Label
@@ -517,38 +425,120 @@ internal static class TextSizePrompt
         };
         stepper.Controls.AddRange([minus, entry, unit, plus]);
         Button reset = BoardStyle.Button("Use default", BoardStyle.PanelTint, BoardStyle.Ink);
-        reset.Bounds = new Rectangle(246, 61, 104, 32);
-        var hint = new Label { Bounds = new Rectangle(22, 101, 328, 21), ForeColor = BoardStyle.Muted };
-        var preview = new Panel { Bounds = new Rectangle(22, 129, 328, 48), BackColor = notePaper, AccessibleName = "Text size preview" };
+        reset.Text = $"{defaultSize} pt default";
+        reset.Bounds = new Rectangle(254, 101, 96, 32);
+        var hint = new Label { Bounds = new Rectangle(112, 142, 238, 21), ForeColor = BoardStyle.Muted };
+        var colorLabel = new Label { Text = "Color", Bounds = new Rectangle(22, 174, 80, 27), TextAlign = ContentAlignment.MiddleLeft };
+        var palette = new Panel { Bounds = new Rectangle(112, 172, 238, 30), AccessibleName = "Font color palette" };
+        var swatches = new List<RadioButton>(BoardStyle.TextColors.Length);
+        Color baseInk = currentInk.IsEmpty ? BoardStyle.Ink : currentInk;
+        int existingOpacity = 100;
+        if (!currentInk.IsEmpty)
+        {
+            foreach (var (_, color) in BoardStyle.TextColors)
+            {
+                int match = Enumerable.Range(MinimumOpacity, 101 - MinimumOpacity).Reverse()
+                    .FirstOrDefault(value => TextInk(color, notePaper, value).ToArgb() == currentInk.ToArgb());
+                if (match == 0) continue;
+                baseInk = color;
+                existingOpacity = match;
+                break;
+            }
+        }
+        for (int i = 0; i < BoardStyle.TextColors.Length; i++)
+        {
+            (string name, Color color) = BoardStyle.TextColors[i];
+            var swatch = new RadioButton
+            {
+                Appearance = Appearance.Button, FlatStyle = FlatStyle.Flat, UseVisualStyleBackColor = false,
+                Bounds = new Rectangle(i * 27, 3, 26, 25), BackColor = BoardStyle.Paper,
+                ForeColor = color, AccessibleName = name + " font color", Cursor = Cursors.Hand,
+                Checked = !currentInk.IsEmpty && color.ToArgb() == baseInk.ToArgb()
+            };
+            swatch.FlatAppearance.BorderSize = 0;
+            swatch.FlatAppearance.CheckedBackColor = BoardStyle.Paper;
+            swatch.Paint += BoardStyle.PaintColorSwatch;
+            swatchTips.SetToolTip(swatch, i == 0 ? "Default text color" : name);
+            swatches.Add(swatch);
+            palette.Controls.Add(swatch);
+        }
+        var custom = BoardStyle.Button("Custom…", BoardStyle.PanelTint, BoardStyle.Ink);
+        custom.AccessibleName = "Choose a custom font color";
+        custom.Bounds = new Rectangle(156, 1, 82, 28);
+        palette.Controls.Add(custom);
+        var opacityLabel = new Label { Text = "Opacity", Bounds = new Rectangle(22, 217, 90, 27), TextAlign = ContentAlignment.MiddleLeft };
+        var opacity = new TrackBar
+        {
+            AccessibleName = "Text opacity", Minimum = MinimumOpacity, Maximum = 100,
+            TickStyle = TickStyle.None, AutoSize = false, SmallChange = 1, LargeChange = 10,
+            Bounds = new Rectangle(106, 214, 184, 30), Value = existingOpacity
+        };
+        bool inkChanged = false;
+        var percentage = new Label { Bounds = new Rectangle(290, 216, 60, 27), TextAlign = ContentAlignment.MiddleRight };
+        var preview = new Panel { Bounds = new Rectangle(22, 261, 328, 69), BackColor = notePaper, AccessibleName = "Text size preview" };
         BoardStyle.RoundCorners(preview, 7);
-        dialog.Controls.AddRange([stepper, reset, hint, preview]);
+        dialog.Controls.AddRange([familyLabel, family, sizeLabel, stepper, reset, hint, colorLabel, palette, opacityLabel, opacity, percentage, preview]);
         dialog.AddActions("Apply", acceptWithEnter: true);
         var apply = (Button)dialog.AcceptButton!;
 
-        bool TryRead(out int size) => int.TryParse(entry.Text, out size) && size >= 0 && size <= maximum;
+        bool TryRead(out int size) => int.TryParse(entry.Text, out size) && size >= 1 && size <= maximum;
         void UpdateSize()
         {
             bool valid = TryRead(out int size);
-            apply.Enabled = valid;
-            minus.Enabled = valid && size > 0;
+            apply.Enabled = valid || (current is null && entry.Text.Length == 0);
+            minus.Enabled = valid && size > 1;
             plus.Enabled = valid && size < maximum;
-            hint.ForeColor = valid ? BoardStyle.Muted : BoardStyle.Brick;
-            hint.Text = valid ? $"1–{maximum} pt · 0 uses the default" : $"Enter a number from 0 to {maximum}.";
+            hint.ForeColor = apply.Enabled ? BoardStyle.Muted : BoardStyle.Brick;
+            hint.Text = apply.Enabled ? $"1–{maximum} pt" : $"Enter a number from 1 to {maximum}.";
             preview.Invalidate();
         }
         void Step(int change)
         {
-            if (TryRead(out int size)) entry.Text = Math.Clamp(size + change, 0, maximum).ToString();
+            if (TryRead(out int size)) entry.Text = Math.Clamp(size + change, 1, maximum).ToString();
         }
 
         preview.Paint += (_, e) =>
         {
             float points = TryRead(out int size) && size > 0 ? size : noteFont.SizeInPoints;
-            using var font = new Font(noteFont.FontFamily, points);
-            TextRenderer.DrawText(e.Graphics, "Sample text", font, preview.ClientRectangle, BoardStyle.Ink,
+            using var font = new Font(family.SelectedIndex > 0 ? (string)family.SelectedItem! : noteFont.Name, points);
+            Color ink = inkChanged ? TextInk(baseInk, notePaper, opacity.Value)
+                : currentInk.IsEmpty ? BoardStyle.Ink : currentInk;
+            TextRenderer.DrawText(e.Graphics, "Sample text", font, preview.ClientRectangle, ink,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
         };
         entry.TextChanged += (_, _) => UpdateSize();
+        percentage.Text = currentInk.IsEmpty ? "Mixed" : $"{opacity.Value}%";
+        foreach (RadioButton swatch in swatches)
+        {
+            swatch.CheckedChanged += (_, _) =>
+            {
+                if (swatch.Checked) ChangeInk(swatch.ForeColor);
+                swatch.Invalidate();
+            };
+        }
+        custom.Click += (_, _) =>
+        {
+            using var picker = new ColorDialog { Color = baseInk, FullOpen = true };
+            if (picker.ShowDialog(dialog) != DialogResult.OK) return;
+            RadioButton? preset = swatches.FirstOrDefault(button => button.ForeColor.ToArgb() == picker.Color.ToArgb());
+            foreach (RadioButton swatch in swatches) swatch.Checked = swatch == preset;
+            ChangeInk(picker.Color);
+        };
+
+        void ChangeInk(Color color)
+        {
+            baseInk = color;
+            inkChanged = true;
+            percentage.Text = $"{opacity.Value}%";
+            preview.Invalidate();
+        }
+        opacity.ValueChanged += (_, _) =>
+        {
+            inkChanged = true;
+            percentage.Text = $"{opacity.Value}%";
+            preview.Invalidate();
+        };
+        family.SelectedIndexChanged += (_, _) => preview.Invalidate();
         entry.KeyDown += (_, e) =>
         {
             if (e.KeyCode is not (Keys.Up or Keys.Down)) return;
@@ -558,9 +548,13 @@ internal static class TextSizePrompt
         };
         minus.Click += (_, _) => Step(-1);
         plus.Click += (_, _) => Step(1);
-        reset.Click += (_, _) => entry.Text = "0";
+        reset.Click += (_, _) => entry.Text = defaultSize.ToString();
         dialog.Shown += (_, _) => { entry.Focus(); entry.SelectAll(); };
         UpdateSize();
-        return dialog.ShowDialog(owner) == DialogResult.OK && TryRead(out int result) ? result : null;
+        if (dialog.ShowDialog(owner) != DialogResult.OK) return null;
+        Color appliedInk = TextInk(baseInk, notePaper, opacity.Value);
+        return (TryRead(out int result) && result != current ? result : null,
+            inkChanged && (currentInk.IsEmpty || appliedInk.ToArgb() != currentInk.ToArgb()) ? appliedInk : null,
+            family.SelectedIndex > 0 && family.SelectedIndex != originalFamily ? (string)family.SelectedItem! : null);
     }
 }
